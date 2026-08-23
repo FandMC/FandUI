@@ -1,0 +1,23 @@
+pluginManagement {
+    repositories {
+        maven {
+            name = "Fabric"
+            url = uri("https://maven.fabricmc.net/")
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+rootProject.name = "FandUI"
+
+include(
+        "fandui-api",
+        "fandui-core",
+        "fandui-text-skija",
+        "fandui-canvas",
+        "fandui-render-opengl",
+        "fandui-fabric-1.20.1",
+        "fandui-fabric-1.21.4",
+        "fandui-fabric-26.2"
+)

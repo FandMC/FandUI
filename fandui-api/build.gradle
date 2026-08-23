@@ -1,0 +1,144 @@
+plugins {
+    id "java-library"
+    id "maven-publish"
+}
+
+configurations {
+    japicmp
+}
+
+base {
+    archivesName = "fandui-api"
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+    withSourcesJar()
+    withJavadocJar()
+}
+
+tasks.named("javadoc", Javadoc) {
+    source = sourceSets.main.allJava.matching {
+        include "cn/fandmc/fandui/api/**"
+    }
+    options.addBooleanOption("Xdoclint:all,-missing", true)
+}
+
+tasks.named("sourcesJar", Jar) {
+    exclude "cn/fandmc/fandui/internal/**"
+}
+
+tasks.register("verifyPublishedApiDocumentation") {
+    group = "verification"
+    description = "Verifies that published API documentation and sources exclude internal packages."
+    dependsOn(tasks.named("javadoc"), tasks.named("sourcesJar"))
+
+    doLast {
+        File javadocRoot = layout.buildDirectory.dir("docs/javadoc").get().asFile
+        File index = new File(javadocRoot, "index.html")
+        if (!index.isFile()) {
+            throw new GradleException("Missing generated API Javadoc index: ${index}")
+        }
+        File internalDocs = new File(javadocRoot, "cn/fandmc/fandui/internal")
+        if (internalDocs.exists()) {
+            throw new GradleException("Generated API Javadoc contains internal packages: ${internalDocs}")
+        }
+
+        File sources = tasks.named("sourcesJar", Jar).get().archiveFile.get().asFile
+        def leakedSources = zipTree(sources).matching {
+            include "cn/fandmc/fandui/internal/**"
+        }.files
+        if (!leakedSources.isEmpty()) {
+            throw new GradleException("API sources JAR contains internal sources: ${leakedSources}")
+        }
+    }
+}
+
+tasks.named("check") {
+    dependsOn(tasks.named("verifyPublishedApiDocumentation"))
+}
+
+dependencies {
+    compileOnlyApi "org.jspecify:jspecify:${jspecify_version}"
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+
+    japicmp "com.github.siom79.japicmp:japicmp:${japicmp_version}:jar-with-dependencies"
+}
+
+def publicApiJar = tasks.register("publicApiJar", Jar) {
+    group = "build"
+    description = "Builds the deterministic public API binary used for compatibility checks."
+    dependsOn(tasks.named("classes"))
+    archiveClassifier = "public-api"
+    from(sourceSets.main.output) {
+        include "cn/fandmc/fandui/api/**"
+    }
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
+def apiBaseline = layout.projectDirectory.file(
+        "api-baseline/${api_baseline_version}/fandui-api-${api_baseline_version}.jar")
+
+tasks.register("updateApiBaseline") {
+    group = "release"
+    description = "Explicitly replaces the checked-in API compatibility baseline."
+    dependsOn(publicApiJar)
+    inputs.file(publicApiJar.flatMap { it.archiveFile })
+    outputs.file(apiBaseline)
+
+    doLast {
+        File target = apiBaseline.asFile
+        target.parentFile.mkdirs()
+        copy {
+            from(publicApiJar.get().archiveFile)
+            into(target.parentFile)
+            rename { target.name }
+        }
+    }
+}
+
+def checkApiCompatibility = tasks.register("checkApiCompatibility", JavaExec) {
+    group = "verification"
+    description = "Checks source and binary compatibility against the 0.1 public API baseline."
+    dependsOn(publicApiJar)
+    classpath = configurations.japicmp
+    mainClass = "japicmp.JApiCmp"
+
+    doFirst {
+        File baseline = apiBaseline.asFile
+        if (!baseline.isFile()) {
+            throw new GradleException(
+                    "Missing API baseline ${baseline}; run :fandui-api:updateApiBaseline explicitly")
+        }
+        File report = layout.buildDirectory.file("reports/api-compatibility.html").get().asFile
+        report.parentFile.mkdirs()
+        args = [
+                "--old", baseline.absolutePath,
+                "--new", publicApiJar.get().archiveFile.get().asFile.absolutePath,
+                "-a", "public",
+                "--only-modified",
+                "--old-classpath", sourceSets.main.compileClasspath.asPath,
+                "--new-classpath", sourceSets.main.compileClasspath.asPath,
+                "--error-on-binary-incompatibility",
+                "--error-on-source-incompatibility",
+                "--html-file", report.absolutePath,
+                "--report-only-filename"
+        ]
+    }
+}
+
+tasks.named("check") {
+    dependsOn(checkApiCompatibility)
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
+    }
+}

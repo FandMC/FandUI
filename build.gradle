@@ -1,0 +1,165 @@
+import java.security.MessageDigest
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+
+plugins {
+    id "base"
+    id "net.fabricmc.fabric-loom" version "${loom_version}" apply false
+    id "net.fabricmc.fabric-loom-remap" version "${loom_version}" apply false
+}
+
+group = maven_group
+version = mod_version
+
+allprojects {
+    repositories {
+        mavenCentral()
+        maven {
+            name = "Fabric"
+            url = "https://maven.fabricmc.net/"
+        }
+    }
+}
+
+subprojects {
+    group = rootProject.group
+    version = rootProject.version
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = "UTF-8"
+        options.compilerArgs.add("-Xlint:all")
+    }
+
+    tasks.withType(Javadoc).configureEach {
+        options.encoding = "UTF-8"
+        options.charSet = "UTF-8"
+        options.docEncoding = "UTF-8"
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+        testLogging {
+            events "failed", "skipped"
+        }
+    }
+}
+
+tasks.register("buildAll") {
+    group = "build"
+    description = "Builds all shared modules and all independently publishable Fabric jars."
+    dependsOn(subprojects.collect { it.tasks.named("build") })
+}
+
+def sha256 = { byte[] bytes ->
+    MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .encodeHex()
+            .toString()
+            .toUpperCase(Locale.ROOT)
+}
+
+def apiClassHashes = { File archive ->
+    Map<String, String> hashes = new TreeMap<>()
+    new ZipFile(archive).withCloseable { zip ->
+        def entries = zip.entries()
+        while (entries.hasMoreElements()) {
+            def entry = entries.nextElement()
+            if (!entry.directory
+                    && entry.name.startsWith("cn/fandmc/fandui/api/")
+                    && entry.name.endsWith(".class")) {
+                hashes.put(entry.name, sha256(zip.getInputStream(entry).readAllBytes()))
+            }
+        }
+    }
+    return hashes
+}
+
+def embeddedApiClassHashes = { File archive ->
+    byte[] nestedBytes
+    String nestedName
+    new ZipFile(archive).withCloseable { zip ->
+        def candidates = []
+        def entries = zip.entries()
+        while (entries.hasMoreElements()) {
+            def entry = entries.nextElement()
+            if (!entry.directory
+                    && entry.name.startsWith("META-INF/jars/fandui-api-")
+                    && entry.name.endsWith(".jar")) {
+                candidates.add(entry)
+            }
+        }
+        if (candidates.size() != 1) {
+            throw new GradleException(
+                    "Expected exactly one embedded fandui-api JAR in ${archive}, found ${candidates*.name}")
+        }
+        nestedName = candidates[0].name
+        nestedBytes = zip.getInputStream(candidates[0]).readAllBytes()
+    }
+
+    Map<String, String> hashes = new TreeMap<>()
+    new ZipInputStream(new ByteArrayInputStream(nestedBytes)).withCloseable { nested ->
+        for (def entry = nested.nextEntry; entry != null; entry = nested.nextEntry) {
+            if (!entry.directory
+                    && entry.name.startsWith("cn/fandmc/fandui/api/")
+                    && entry.name.endsWith(".class")) {
+                hashes.put(entry.name, sha256(nested.readAllBytes()))
+            }
+        }
+    }
+    return [name: nestedName, hashes: hashes]
+}
+
+def fabricArchives = [
+        [path: ":fandui-fabric-1.20.1", task: "remapJar"],
+        [path: ":fandui-fabric-1.21.4", task: "remapJar"],
+        [path: ":fandui-fabric-26.2", task: "jar"]
+]
+
+def verifyEmbeddedApiConsistency = tasks.register("verifyEmbeddedApiConsistency") {
+    group = "verification"
+    description = "Verifies identical public API classes in all three publishable Fabric JARs."
+    dependsOn(":fandui-api:jar")
+    fabricArchives.each { candidate -> dependsOn("${candidate.path}:${candidate.task}") }
+
+    doLast {
+        File canonicalArchive = project(":fandui-api").tasks.named("jar", Jar).get().archiveFile.get().asFile
+        Map<String, String> canonical = apiClassHashes(canonicalArchive)
+        if (canonical.isEmpty()) {
+            throw new GradleException("Canonical API JAR contains no public API classes: ${canonicalArchive}")
+        }
+
+        List<String> reportLines = [
+                "canonical=${canonicalArchive.absolutePath}",
+                "classes=${canonical.size()}"
+        ]
+        fabricArchives.each { candidate ->
+            def archiveTask = project(candidate.path).tasks.named(
+                    candidate.task, org.gradle.api.tasks.bundling.AbstractArchiveTask).get()
+            File archive = archiveTask.archiveFile.get().asFile
+            def embedded = embeddedApiClassHashes(archive)
+            if (embedded.hashes != canonical) {
+                Set<String> missing = canonical.keySet() - embedded.hashes.keySet()
+                Set<String> extra = embedded.hashes.keySet() - canonical.keySet()
+                Set<String> changed = canonical.keySet().findAll {
+                    embedded.hashes.containsKey(it) && embedded.hashes[it] != canonical[it]
+                }
+                throw new GradleException(
+                        "Embedded API differs in ${archive}: missing=${missing}, extra=${extra}, changed=${changed}")
+            }
+            reportLines.add("${candidate.path}=${archive.absolutePath}|${embedded.name}|${embedded.hashes.size()}")
+        }
+
+        File report = layout.buildDirectory.file("reports/api-class-consistency.txt").get().asFile
+        report.parentFile.mkdirs()
+        report.setText(reportLines.join(System.lineSeparator()) + System.lineSeparator(), "UTF-8")
+        logger.lifecycle("Verified ${canonical.size()} identical public API classes in all Fabric JARs")
+    }
+}
+
+tasks.named("buildAll") {
+    dependsOn(verifyEmbeddedApiConsistency)
+}
+
+tasks.named("check") {
+    dependsOn(verifyEmbeddedApiConsistency)
+}

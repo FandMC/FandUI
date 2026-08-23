@@ -1,0 +1,35 @@
+plugins {
+    id "java-library"
+    id "maven-publish"
+}
+
+base {
+    archivesName = "fandui-text-skija"
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+    withSourcesJar()
+    withJavadocJar()
+}
+
+dependencies {
+    api project(":fandui-api")
+    implementation project(":fandui-canvas")
+    implementation project(":fandui-core")
+    implementation "io.github.humbleui:skija-shared:${skija_version}"
+    compileOnly "org.jetbrains:annotations:${skija_annotations_version}"
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+    testRuntimeOnly "io.github.humbleui:skija-windows-x64:${skija_version}"
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
+    }
+}

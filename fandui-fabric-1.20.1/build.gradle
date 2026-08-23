@@ -1,0 +1,59 @@
+plugins {
+    id "net.fabricmc.fabric-loom-remap"
+    id "maven-publish"
+}
+
+base {
+    archivesName = "fandui-fabric-1.20.1"
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version_1201}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version_1201}"
+
+    implementation project(":fandui-api")
+    implementation project(":fandui-canvas")
+    implementation project(":fandui-core")
+    implementation project(":fandui-text-skija")
+    implementation project(":fandui-render-opengl")
+    implementation "org.lwjgl:lwjgl-nanovg:${lwjgl_nanovg_version_1201}"
+    runtimeOnly "org.lwjgl:lwjgl-nanovg:${lwjgl_nanovg_version_1201}:natives-windows"
+    runtimeOnly "io.github.humbleui:skija-windows-x64:${skija_version}"
+
+    include project(":fandui-api")
+    include project(":fandui-canvas")
+    include project(":fandui-core")
+    include project(":fandui-text-skija")
+    include project(":fandui-render-opengl")
+    include "org.lwjgl:lwjgl-nanovg:${lwjgl_nanovg_version_1201}"
+    include "org.lwjgl:lwjgl-nanovg:${lwjgl_nanovg_version_1201}:natives-windows"
+    include "io.github.humbleui:skija-shared:${skija_version}"
+    include "io.github.humbleui:types:${skija_types_version}"
+    include "io.github.humbleui:skija-windows-x64:${skija_version}"
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
+    }
+}

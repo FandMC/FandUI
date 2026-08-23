@@ -1,0 +1,31 @@
+plugins {
+    id "java-library"
+    id "maven-publish"
+}
+
+base {
+    archivesName = "fandui-core"
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+    withSourcesJar()
+    withJavadocJar()
+}
+
+dependencies {
+    api project(":fandui-api")
+    implementation project(":fandui-canvas")
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
+    }
+}
