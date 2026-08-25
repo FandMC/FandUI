@@ -21,7 +21,6 @@ import cn.fandmc.fandui.api.style.ClipMode;
 import cn.fandmc.fandui.api.style.Style;
 import cn.fandmc.fandui.api.style.StyleResolver;
 import cn.fandmc.fandui.api.style.ThemeToken;
-import cn.fandmc.fandui.internal.component.ComponentBindings;
 import cn.fandmc.fandui.internal.control.ScrollControllerState;
 import cn.fandmc.fandui.internal.control.ScrollControllers;
 import org.jspecify.annotations.Nullable;
@@ -47,7 +46,7 @@ public final class ScrollContainer extends UiContainer implements ContentClipPro
     private double dragStartOffset;
 
     private ScrollContainer(Builder builder) {
-        super(builder.key);
+        super(builder.key, 1, 1);
         axis = builder.axis;
         controller = builder.controller;
         controllerState = ScrollControllers.state(controller);
@@ -76,9 +75,7 @@ public final class ScrollContainer extends UiContainer implements ContentClipPro
     }
 
     public void setChild(UiComponent child) {
-        Objects.requireNonNull(child, "child");
-        remove(0);
-        add(child);
+        replace(0, child);
     }
 
     public Axis axis() {
@@ -86,7 +83,7 @@ public final class ScrollContainer extends UiContainer implements ContentClipPro
     }
 
     public void setAxis(Axis axis) {
-        ComponentBindings.assertMutationAllowed(this);
+        requireMutationThread();
         Axis checked = Objects.requireNonNull(axis, "axis");
         if (this.axis != checked) {
             this.axis = checked;
@@ -170,13 +167,6 @@ public final class ScrollContainer extends UiContainer implements ContentClipPro
             changes.close();
         }
         this.context = null;
-    }
-
-    @Override
-    protected void validateChildAddition(UiComponent child, int index) {
-        if (!children().isEmpty()) {
-            throw new IllegalStateException("ScrollContainer accepts exactly one child");
-        }
     }
 
     private void updateMaximum(double maximum) {

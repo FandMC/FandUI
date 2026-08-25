@@ -23,6 +23,16 @@ public interface UiRuntime {
     /** Returns capabilities detected for the active platform bridge. */
     UiCapabilities capabilities();
 
+    /**
+     * Returns a current immutable renderer diagnostic snapshot.
+     *
+     * <p>The default preserves compatibility with custom runtime implementations compiled
+     * before renderer diagnostics were added.</p>
+     */
+    default UiDiagnostics diagnostics() {
+        return UiDiagnostics.unknown(availability().detail());
+    }
+
     /** Returns whether the current thread is the FandUI UI thread. */
     boolean isUiThread();
 

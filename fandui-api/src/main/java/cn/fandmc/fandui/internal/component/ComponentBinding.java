@@ -10,7 +10,11 @@ public interface ComponentBinding {
 
     void invalidatePaint(UiComponent component);
 
+    void interactionChanged(UiComponent component);
+
     void childAdded(UiContainer parent, UiComponent child);
 
     void childRemoved(UiContainer parent, UiComponent child);
+
+    void childReplaced(UiContainer parent, UiComponent previous, UiComponent replacement);
 }

@@ -51,7 +51,7 @@ public final class SceneCompiler {
         }
         float opacity = inheritedOpacity * style.opacity();
         canvas.setGlobalAlpha(opacity);
-        Rect bounds = new Rect(0.0f, 0.0f, node.size().width(), node.size().height());
+        Rect bounds = node.localBounds();
         applyClip(canvas, node, style, bounds);
         if (style.backdropBlurRadius() > 0.0f) {
             canvas.backdropBlur(bounds, style.cornerRadii(), style.backdropBlurRadius());

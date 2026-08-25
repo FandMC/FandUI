@@ -10,7 +10,6 @@ import static org.lwjgl.nanovg.NanoVG.NVG_IMAGE_PREMULTIPLIED;
 import static org.lwjgl.nanovg.NanoVG.nvgDeleteImage;
 import static org.lwjgl.nanovg.NanoVGGL3.NVG_IMAGE_NODELETE;
 import static org.lwjgl.nanovg.NanoVGGL3.nvglCreateImageFromHandle;
-import static org.lwjgl.opengl.GL11.glIsTexture;
 
 final class NanoVgExternalImages implements AutoCloseable {
     private final long context;
@@ -51,11 +50,6 @@ final class NanoVgExternalImages implements AutoCloseable {
         if (width < 1 || height < 1) {
             throw new OpenGlRenderException("NanoVG external image dimensions must be positive");
         }
-        if (!glIsTexture(texture.textureId())) {
-            throw new OpenGlRenderException(
-                    "FandUI external image texture is not live: " + texture.textureId());
-        }
-
         Key key = new Key(resourceKey, sampling, alphaOnly);
         Image existing = entries.get(key);
         if (existing != null && !existing.matches(texture.textureId(), width, height)) {

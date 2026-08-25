@@ -17,7 +17,7 @@ public final class ConstrainedBox extends UiContainer {
     private Alignment alignment;
 
     private ConstrainedBox(Builder builder) {
-        super(builder.key);
+        super(builder.key, 1, 1);
         this.additionalConstraints = builder.constraints;
         this.alignment = builder.alignment;
         add(builder.child);
@@ -27,11 +27,20 @@ public final class ConstrainedBox extends UiContainer {
         return new Builder(child, constraints);
     }
 
+    public UiComponent child() {
+        return children().get(0);
+    }
+
+    public void setChild(UiComponent child) {
+        replace(0, child);
+    }
+
     public Constraints additionalConstraints() {
         return additionalConstraints;
     }
 
     public void setAdditionalConstraints(Constraints constraints) {
+        requireMutationThread();
         Constraints checked = Objects.requireNonNull(constraints, "constraints");
         if (!additionalConstraints.equals(checked)) {
             additionalConstraints = checked;
@@ -44,6 +53,7 @@ public final class ConstrainedBox extends UiContainer {
     }
 
     public void setAlignment(Alignment alignment) {
+        requireMutationThread();
         Alignment checked = Objects.requireNonNull(alignment, "alignment");
         if (this.alignment != checked) {
             this.alignment = checked;
@@ -54,20 +64,13 @@ public final class ConstrainedBox extends UiContainer {
     @Override
     public MeasureResult measure(MeasureScope scope, Constraints constraints) {
         Constraints effective = intersect(constraints, additionalConstraints);
-        Placeable child = scope.measure(children().get(0), effective);
+        Placeable child = scope.measure(child(), effective);
         Size size = constraints.constrain(child.size());
         return scope.layout(size.width(), size.height(), placements -> {
             float x = Math.max(0.0f, size.width() - child.size().width()) * alignment.horizontalFactor();
             float y = Math.max(0.0f, size.height() - child.size().height()) * alignment.verticalFactor();
             placements.place(child, x, y);
         });
-    }
-
-    @Override
-    protected void validateChildAddition(UiComponent child, int index) {
-        if (!children().isEmpty()) {
-            throw new IllegalStateException("ConstrainedBox accepts exactly one child");
-        }
     }
 
     private static Constraints intersect(Constraints parent, Constraints own) {

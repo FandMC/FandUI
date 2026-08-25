@@ -16,7 +16,7 @@ public final class ThemeScope extends UiContainer {
     private boolean inherit;
 
     private ThemeScope(Builder builder) {
-        super(builder.key);
+        super(builder.key, 1, 1);
         theme = builder.theme;
         inherit = builder.inherit;
         add(builder.child);
@@ -25,10 +25,12 @@ public final class ThemeScope extends UiContainer {
     public static Builder builder(UiComponent child) { return new Builder(child); }
     public static ThemeScope of(Theme theme, UiComponent child) { return builder(child).theme(theme).build(); }
     public UiComponent child() { return children().get(0); }
+    public void setChild(UiComponent child) { replace(0, child); }
     public Theme themeOverride() { return theme; }
     public boolean inheritsParent() { return inherit; }
 
     public void setThemeOverride(Theme value) {
+        requireMutationThread();
         Theme checked = Objects.requireNonNull(value, "value");
         if (theme != checked) {
             theme = checked;
@@ -37,6 +39,7 @@ public final class ThemeScope extends UiContainer {
     }
 
     public void setInheritsParent(boolean value) {
+        requireMutationThread();
         if (inherit != value) {
             inherit = value;
             invalidateLayout();
@@ -46,13 +49,6 @@ public final class ThemeScope extends UiContainer {
     @Override
     public MeasureResult measure(MeasureScope scope, Constraints constraints) {
         return SingleChildSupport.measure(child(), Alignment.TOP_LEFT, scope, constraints);
-    }
-
-    @Override
-    protected void validateChildAddition(UiComponent child, int index) {
-        if (!children().isEmpty()) {
-            throw new IllegalStateException("ThemeScope accepts exactly one child");
-        }
     }
 
     public static final class Builder {

@@ -28,6 +28,12 @@ import cn.fandmc.fandui.core.layout.LayoutSnapshot;
 import cn.fandmc.fandui.core.scene.SceneCompiler;
 import cn.fandmc.fandui.internal.component.ComponentBinding;
 import cn.fandmc.fandui.internal.component.ComponentBindings;
+import jdk.jfr.Category;
+import jdk.jfr.Event;
+import jdk.jfr.EventType;
+import jdk.jfr.Label;
+import jdk.jfr.Name;
+import jdk.jfr.StackTrace;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -44,6 +50,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 abstract class AbstractCoreSession implements UiSession, ComponentBinding, ComponentContext {
     private static final UiViewport EMPTY_VIEWPORT = new UiViewport(0.0f, 0.0f, 0, 0, 1.0f);
+    private static final EventType FRAME_EVENT_TYPE = EventType.getEventType(CoreFrameEvent.class);
 
     private final CoreUiRuntime runtime;
     private final UiComponent root;
@@ -206,7 +213,6 @@ abstract class AbstractCoreSession implements UiSession, ComponentBinding, Compo
     @Override
     public final void invalidateLayout(UiComponent component) {
         requireMember(component);
-        focus.reconcileEligibility();
         layoutDirty = true;
         paintDirty = true;
     }
@@ -214,11 +220,16 @@ abstract class AbstractCoreSession implements UiSession, ComponentBinding, Compo
     @Override
     public final void invalidatePaint(UiComponent component) {
         requireMember(component);
+        paintDirty = true;
+    }
+
+    @Override
+    public final void interactionChanged(UiComponent component) {
+        requireMember(component);
         focus.reconcileEligibility();
         if (ancestorOrSelf(component, hovered)) {
             runtime.updateCursor(resolveCursor(hovered));
         }
-        paintDirty = true;
     }
 
     @Override
@@ -238,6 +249,30 @@ abstract class AbstractCoreSession implements UiSession, ComponentBinding, Compo
     public final void childRemoved(UiContainer parent, UiComponent child) {
         requireMember(parent);
         RuntimeException failure = detachSubtree(child);
+        layoutDirty = true;
+        paintDirty = true;
+        if (failure != null) {
+            requestClose(SessionCloseReason.FAILED, true);
+        }
+    }
+
+    @Override
+    public final void childReplaced(
+            UiContainer parent,
+            UiComponent previous,
+            UiComponent replacement) {
+        requireMember(parent);
+        Map<UiKey, UiComponent> replacedKeys = subtreeKeys(previous);
+        List<UiComponent> replacementNodes = collectSubtree(replacement);
+        validateAttachable(replacementNodes, replacedKeys);
+        try {
+            attachNodes(replacementNodes, replacedKeys);
+        } catch (RuntimeException | Error exception) {
+            requestCloseDeferred(SessionCloseReason.FAILED, true);
+            throw exception;
+        }
+
+        RuntimeException failure = detachSubtree(previous);
         layoutDirty = true;
         paintDirty = true;
         if (failure != null) {
@@ -281,20 +316,45 @@ abstract class AbstractCoreSession implements UiSession, ComponentBinding, Compo
             }
         }
 
+        int activeAnimations = animations.activeCount();
+        boolean profileFrame = activeAnimations > 0 || layoutDirty || paintDirty;
+        CoreFrameEvent performanceEvent = profileFrame && FRAME_EVENT_TYPE.isEnabled()
+                ? new CoreFrameEvent()
+                : null;
+        if (performanceEvent != null) {
+            performanceEvent.frameTimeNanos = frameTimeNanos;
+            performanceEvent.activeAnimations = activeAnimations;
+            performanceEvent.layoutRequested = layoutDirty;
+            performanceEvent.paintRequested = paintDirty;
+            performanceEvent.begin();
+        }
+
         enterCallback();
         try {
+            long animationStarted = performanceEvent == null ? 0L : System.nanoTime();
             animations.tick(frameTimeNanos);
+            if (performanceEvent != null) {
+                performanceEvent.animationNanos = System.nanoTime() - animationStarted;
+            }
             if (!active.get()) {
                 return null;
             }
             if (layoutDirty) {
+                long layoutStarted = performanceEvent == null ? 0L : System.nanoTime();
                 LayoutSnapshot candidateLayout = layoutEngine.layout(
                         root,
                         Constraints.tight(new Size(nextViewport.logicalWidth(), nextViewport.logicalHeight())),
                         layoutDirection,
                         theme,
                         this::visualState);
+                if (performanceEvent != null) {
+                    performanceEvent.layoutNanos = System.nanoTime() - layoutStarted;
+                }
+                long sceneStarted = performanceEvent == null ? 0L : System.nanoTime();
                 DisplayList candidateDisplayList = sceneCompiler.compile(candidateLayout, frameTimeNanos);
+                if (performanceEvent != null) {
+                    performanceEvent.sceneNanos = System.nanoTime() - sceneStarted;
+                }
                 if (!active.get()) {
                     return null;
                 }
@@ -303,8 +363,12 @@ abstract class AbstractCoreSession implements UiSession, ComponentBinding, Compo
                 layoutDirty = false;
                 paintDirty = false;
             } else if (paintDirty) {
+                long sceneStarted = performanceEvent == null ? 0L : System.nanoTime();
                 DisplayList candidateDisplayList = sceneCompiler.compile(
                         Objects.requireNonNull(layout, "layout"), frameTimeNanos);
+                if (performanceEvent != null) {
+                    performanceEvent.sceneNanos = System.nanoTime() - sceneStarted;
+                }
                 if (!active.get()) {
                     return null;
                 }
@@ -324,6 +388,10 @@ abstract class AbstractCoreSession implements UiSession, ComponentBinding, Compo
                     : new UiSceneFrame(this, previous, previousViewport, frameTimeNanos);
         } finally {
             exitCallback();
+            if (performanceEvent != null) {
+                performanceEvent.end();
+                performanceEvent.commit();
+            }
         }
 
         return new UiSceneFrame(
@@ -538,18 +606,33 @@ abstract class AbstractCoreSession implements UiSession, ComponentBinding, Compo
 
     private void attachSubtree(UiComponent subtree) {
         List<UiComponent> nodes = collectSubtree(subtree);
+        validateAttachable(nodes, Map.of());
+        attachNodes(nodes, Map.of());
+    }
+
+    private void validateAttachable(
+            List<UiComponent> nodes,
+            Map<UiKey, UiComponent> replacedKeys) {
         Map<UiKey, UiComponent> candidateKeys = new LinkedHashMap<>();
         for (UiComponent node : nodes) {
             if (ComponentBindings.bound(node)) {
                 throw new IllegalStateException("Component is already attached: " + node);
             }
             node.key().ifPresent(key -> {
-                if (keyedComponents.containsKey(key) || candidateKeys.putIfAbsent(key, node) != null) {
+                UiComponent existing = keyedComponents.get(key);
+                if (existing != null && replacedKeys.get(key) != existing) {
+                    throw new IllegalStateException("Duplicate component key in session: " + key);
+                }
+                if (candidateKeys.putIfAbsent(key, node) != null) {
                     throw new IllegalStateException("Duplicate component key in session: " + key);
                 }
             });
         }
+    }
 
+    private void attachNodes(
+            List<UiComponent> nodes,
+            Map<UiKey, UiComponent> replacedKeys) {
         List<UiComponent> bound = new ArrayList<>();
         List<UiComponent> callbacks = new ArrayList<>();
         try {
@@ -582,8 +665,17 @@ abstract class AbstractCoreSession implements UiSession, ComponentBinding, Compo
                 components.remove(node);
                 ComponentBindings.unbind(node, this);
             }
+            replacedKeys.forEach(keyedComponents::putIfAbsent);
             throw exception;
         }
+    }
+
+    private Map<UiKey, UiComponent> subtreeKeys(UiComponent subtree) {
+        Map<UiKey, UiComponent> result = new LinkedHashMap<>();
+        for (UiComponent node : collectSubtree(subtree)) {
+            node.key().ifPresent(key -> result.put(key, node));
+        }
+        return Map.copyOf(result);
     }
 
     private RuntimeException detachSubtree(UiComponent subtree) {
@@ -727,5 +819,32 @@ abstract class AbstractCoreSession implements UiSession, ComponentBinding, Compo
     }
 
     private record PendingClose(SessionCloseReason reason, boolean notifyHost) {
+    }
+
+    @Name("cn.fandmc.fandui.CoreFrame")
+    @Label("FandUI Core Animation Frame")
+    @Category("FandUI")
+    @StackTrace(false)
+    static final class CoreFrameEvent extends Event {
+        @Label("Frame Time")
+        public long frameTimeNanos;
+
+        @Label("Active Animations")
+        public int activeAnimations;
+
+        @Label("Layout Requested")
+        public boolean layoutRequested;
+
+        @Label("Paint Requested")
+        public boolean paintRequested;
+
+        @Label("Animation Tick")
+        public long animationNanos;
+
+        @Label("Layout")
+        public long layoutNanos;
+
+        @Label("Scene Compile")
+        public long sceneNanos;
     }
 }

@@ -1,6 +1,7 @@
 package cn.fandmc.fandui.canvas;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
@@ -9,13 +10,20 @@ public final class DisplayList {
     private final int maximumClipDepth;
     private final boolean hasBackdropBlur;
 
+    /** Takes exclusive ownership of {@code commands}; callers must not mutate it afterwards. */
     DisplayList(List<DisplayCommand> commands, int maximumClipDepth) {
-        this.commands = List.copyOf(Objects.requireNonNull(commands, "commands"));
+        Objects.requireNonNull(commands, "commands");
         if (maximumClipDepth < 0 || maximumClipDepth > RecordingCanvas2D.MAX_CLIP_DEPTH) {
             throw new IllegalArgumentException("Invalid maximumClipDepth: " + maximumClipDepth);
         }
+        boolean backdropBlur = false;
+        for (DisplayCommand command : commands) {
+            Objects.requireNonNull(command, "commands contains null");
+            backdropBlur |= command instanceof DisplayCommand.BackdropBlur;
+        }
+        this.commands = Collections.unmodifiableList(commands);
         this.maximumClipDepth = maximumClipDepth;
-        this.hasBackdropBlur = this.commands.stream().anyMatch(DisplayCommand.BackdropBlur.class::isInstance);
+        this.hasBackdropBlur = backdropBlur;
     }
 
     public List<DisplayCommand> commands() {

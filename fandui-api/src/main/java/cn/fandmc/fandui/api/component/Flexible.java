@@ -19,7 +19,7 @@ public final class Flexible extends UiContainer {
     private Alignment alignment;
 
     private Flexible(Builder builder) {
-        super(builder.key);
+        super(builder.key, 1, 1);
         this.grow = builder.grow;
         this.shrink = builder.shrink;
         this.basis = builder.basis;
@@ -40,11 +40,16 @@ public final class Flexible extends UiContainer {
         return children().get(0);
     }
 
+    public void setChild(UiComponent child) {
+        replace(0, child);
+    }
+
     public float grow() {
         return grow;
     }
 
     public void setGrow(float value) {
+        requireMutationThread();
         float checked = Preconditions.nonNegative(value, "grow");
         if (Float.compare(grow, checked) != 0) {
             grow = checked;
@@ -57,6 +62,7 @@ public final class Flexible extends UiContainer {
     }
 
     public void setShrink(float value) {
+        requireMutationThread();
         float checked = Preconditions.nonNegative(value, "shrink");
         if (Float.compare(shrink, checked) != 0) {
             shrink = checked;
@@ -69,6 +75,7 @@ public final class Flexible extends UiContainer {
     }
 
     public void setBasis(float value) {
+        requireMutationThread();
         float checked = Preconditions.nonNegative(value, "basis");
         if (Float.compare(basis, checked) != 0) {
             basis = checked;
@@ -81,6 +88,7 @@ public final class Flexible extends UiContainer {
     }
 
     public void setFit(FlexFit value) {
+        requireMutationThread();
         FlexFit checked = Objects.requireNonNull(value, "value");
         if (fit != checked) {
             fit = checked;
@@ -93,6 +101,7 @@ public final class Flexible extends UiContainer {
     }
 
     public void setAlignment(Alignment value) {
+        requireMutationThread();
         Alignment checked = Objects.requireNonNull(value, "value");
         if (alignment != checked) {
             alignment = checked;
@@ -103,13 +112,6 @@ public final class Flexible extends UiContainer {
     @Override
     public MeasureResult measure(MeasureScope scope, Constraints constraints) {
         return SingleChildSupport.measure(child(), alignment, scope, constraints);
-    }
-
-    @Override
-    protected void validateChildAddition(UiComponent child, int index) {
-        if (!children().isEmpty()) {
-            throw new IllegalStateException("Flexible accepts exactly one child");
-        }
     }
 
     public static final class Builder {

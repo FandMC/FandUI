@@ -23,11 +23,11 @@ import org.lwjgl.nanovg.NVGPaint;
 import org.lwjgl.opengl.GL;
 import org.lwjgl.system.MemoryStack;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
+import java.util.Arrays;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -117,8 +117,7 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
         OpenGlTarget target = optionalTarget.orElseThrow();
         frameInfo.validateTarget(target);
         requireContext();
-        GlStateSnapshot snapshot = stateBefore.recapture();
-        Throwable primaryFailure = null;
+        OpenGlPassScope.requireActive();
         boolean externalFrame = false;
         boolean gradientFrame = false;
         try {
@@ -167,27 +166,12 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
                     target.height(),
                     counts.operations,
                     counts.drawCalls);
-        } catch (RuntimeException | Error failure) {
-            primaryFailure = failure;
-            throw failure;
         } finally {
             if (gradientFrame && gradients != null) {
                 gradients.abortFrame();
             }
             if (externalFrame && externalImages != null) {
                 externalImages.abortFrame();
-            }
-            try {
-                snapshot.restore();
-                if (assertState) {
-                    snapshot.assertRestored(stateCheck.recapture());
-                }
-            } catch (RuntimeException restoreFailure) {
-                if (primaryFailure != null) {
-                    primaryFailure.addSuppressed(restoreFailure);
-                } else {
-                    throw restoreFailure;
-                }
             }
         }
     }
@@ -321,16 +305,19 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
     }
 
     private static final class Player {
+        private static final int INITIAL_STATE_DEPTH = 16;
+
         private final long context;
         private final NanoVgFramebuffers framebuffers;
         private final NanoVgLayerCompositor compositor;
         private final NanoVgBackdropBlur backdropBlur;
         private final List<DisplayCommand> stateHistory = new ArrayList<>();
-        private final Deque<StateMarker> states = new ArrayDeque<>();
-        private final Deque<ClipLayer> clips = new ArrayDeque<>();
+        private final List<ClipLayer> clipLayers = new ArrayList<>();
         private final NanoVgTextureSampling textureSampling = new NanoVgTextureSampling();
         private final float[] transformScratch = new float[6];
         private final float[] pixelOffsetScratch = new float[2];
+        private int[] stateClipCounts = new int[INITIAL_STATE_DEPTH];
+        private int[] stateHistorySizes = new int[INITIAL_STATE_DEPTH];
 
         private OpenGlFrameInfo frameInfo;
         private OpenGlTarget target;
@@ -340,6 +327,9 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
         private boolean nanoVgFrame;
         private int operations;
         private int drawCalls;
+        private int stateDepth;
+        private int clipDepth;
+        private int textureIndex;
 
         private Player(
                 long context,
@@ -365,24 +355,30 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
             this.displayList = displayList;
             this.prepared = prepared;
             stateHistory.clear();
-            states.clear();
-            clips.clear();
+            stateDepth = 0;
+            clearActiveClips();
             textureSampling.clear();
             operations = 0;
             drawCalls = 0;
+            textureIndex = 0;
             currentFramebuffer = framebuffers.rootFramebuffer();
             beginNanoVgFrame(false);
             try {
-                for (DisplayCommand command : displayList.commands()) {
-                    execute(command);
+                List<DisplayCommand> commands = displayList.commands();
+                for (int index = 0, size = commands.size(); index < size; index++) {
+                    execute(commands.get(index));
                 }
-                while (!clips.isEmpty()) {
+                prepared.requireTexturesConsumed(textureIndex);
+                while (clipDepth != 0) {
                     closeClip();
                 }
                 endNanoVgFrame();
                 return new RenderCounts(operations, drawCalls);
             } catch (RuntimeException | Error failure) {
                 cancelNanoVgFrame();
+                clearActiveClips();
+                stateDepth = 0;
+                stateHistory.clear();
                 throw failure;
             }
         }
@@ -412,7 +408,7 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
             } else if (command instanceof DisplayCommand.DrawImage
                     || command instanceof DisplayCommand.DrawImageRegion
                     || command instanceof DisplayCommand.DrawText) {
-                drawTexture(command);
+                drawTexture();
             } else {
                 throw new OpenGlRenderException(
                         "Unsupported display command: " + command.getClass().getName());
@@ -425,22 +421,41 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
                 return;
             }
             if (command == DisplayCommand.Save.INSTANCE) {
-                states.push(new StateMarker(clips.size(), stateHistory.size()));
+                pushStateMarker(clipDepth, stateHistory.size());
                 applyState(command);
                 stateHistory.add(command);
             } else if (command == DisplayCommand.Restore.INSTANCE) {
-                StateMarker marker = states.poll();
-                if (marker == null) {
+                if (stateDepth == 0) {
                     throw new OpenGlRenderException("Display list restored an empty NanoVG state stack");
                 }
-                while (clips.size() > marker.clipCount) {
+                int markerIndex = --stateDepth;
+                int markerClipCount = stateClipCounts[markerIndex];
+                int markerHistorySize = stateHistorySizes[markerIndex];
+                while (clipDepth > markerClipCount) {
                     closeClip();
                 }
                 applyState(command);
-                stateHistory.subList(marker.historySize, stateHistory.size()).clear();
+                truncateStateHistory(markerHistorySize);
             } else {
                 applyState(command);
                 stateHistory.add(command);
+            }
+        }
+
+        private void pushStateMarker(int clipCount, int historySize) {
+            if (stateDepth == stateClipCounts.length) {
+                int nextLength = Math.multiplyExact(stateDepth, 2);
+                stateClipCounts = Arrays.copyOf(stateClipCounts, nextLength);
+                stateHistorySizes = Arrays.copyOf(stateHistorySizes, nextLength);
+            }
+            stateClipCounts[stateDepth] = clipCount;
+            stateHistorySizes[stateDepth] = historySize;
+            stateDepth++;
+        }
+
+        private void truncateStateHistory(int size) {
+            while (stateHistory.size() > size) {
+                stateHistory.remove(stateHistory.size() - 1);
             }
         }
 
@@ -516,13 +531,9 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
         }
 
         private void applyPaint(DisplayPaint paint, boolean stroke) {
-            PreparedPaint value = prepared.paints.get(paint);
-            if (value == null) {
-                throw new OpenGlRenderException("Display paint was not prepared");
-            }
             try (MemoryStack stack = MemoryStack.stackPush()) {
-                if (value instanceof SolidPrepared solid) {
-                    NVGColor color = unpremultiplied(solid.color, NVGColor.calloc(stack));
+                if (paint instanceof DisplayPaint.Solid solid) {
+                    NVGColor color = unpremultiplied(solid.color(), NVGColor.calloc(stack));
                     if (stroke) {
                         nvgStrokeColor(context, color);
                     } else {
@@ -532,54 +543,59 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
                 }
 
                 NVGPaint result = NVGPaint.calloc(stack);
-                if (value instanceof NativeLinearPrepared linear) {
+                if (paint instanceof DisplayPaint.Linear linear
+                        && PreparedFrame.nativeStops(linear.stops())) {
                     nvgLinearGradient(
                             context,
-                            linear.start.x(),
-                            linear.start.y(),
-                            linear.end.x(),
-                            linear.end.y(),
-                            unpremultiplied(linear.first, NVGColor.calloc(stack)),
-                            unpremultiplied(linear.last, NVGColor.calloc(stack)),
+                            linear.start().x(),
+                            linear.start().y(),
+                            linear.end().x(),
+                            linear.end().y(),
+                            unpremultiplied(PreparedFrame.first(linear.stops()), NVGColor.calloc(stack)),
+                            unpremultiplied(PreparedFrame.last(linear.stops()), NVGColor.calloc(stack)),
                             result);
-                } else if (value instanceof NativeRadialPrepared radial) {
+                } else if (paint instanceof DisplayPaint.Radial radial
+                        && PreparedFrame.nativeStops(radial.stops())) {
                     nvgRadialGradient(
                             context,
-                            radial.center.x(),
-                            radial.center.y(),
-                            radial.innerRadius,
-                            radial.outerRadius,
-                            unpremultiplied(radial.first, NVGColor.calloc(stack)),
-                            unpremultiplied(radial.last, NVGColor.calloc(stack)),
-                            result);
-                } else if (value instanceof ImageLinearPrepared linear) {
-                    float dx = linear.end.x() - linear.start.x();
-                    float dy = linear.end.y() - linear.start.y();
-                    float length = Math.max((float) Math.sqrt(dx * dx + dy * dy), 1.0e-6f);
-                    nvgImagePattern(
-                            context,
-                            linear.start.x(),
-                            linear.start.y(),
-                            length,
-                            1.0f,
-                            (float) Math.atan2(dy, dx),
-                            linear.image.imageId(),
-                            1.0f,
-                            result);
-                } else if (value instanceof ImageRadialPrepared radial) {
-                    float outer = Math.max(radial.outerRadius, 1.0e-6f);
-                    nvgImagePattern(
-                            context,
-                            radial.center.x() - outer,
-                            radial.center.y() - outer,
-                            outer * 2.0f,
-                            outer * 2.0f,
-                            0.0f,
-                            radial.image.imageId(),
-                            1.0f,
+                            radial.center().x(),
+                            radial.center().y(),
+                            radial.innerRadius(),
+                            radial.outerRadius(),
+                            unpremultiplied(PreparedFrame.first(radial.stops()), NVGColor.calloc(stack)),
+                            unpremultiplied(PreparedFrame.last(radial.stops()), NVGColor.calloc(stack)),
                             result);
                 } else {
-                    throw new OpenGlRenderException("Unknown prepared NanoVG paint");
+                    PreparedPaint value = prepared.paint(paint);
+                    if (value instanceof ImageLinearPrepared linear) {
+                        float dx = linear.end.x() - linear.start.x();
+                        float dy = linear.end.y() - linear.start.y();
+                        float length = Math.max((float) Math.sqrt(dx * dx + dy * dy), 1.0e-6f);
+                        nvgImagePattern(
+                                context,
+                                linear.start.x(),
+                                linear.start.y(),
+                                length,
+                                1.0f,
+                                (float) Math.atan2(dy, dx),
+                                linear.image.imageId(),
+                                1.0f,
+                                result);
+                    } else if (value instanceof ImageRadialPrepared radial) {
+                        float outer = Math.max(radial.outerRadius, 1.0e-6f);
+                        nvgImagePattern(
+                                context,
+                                radial.center.x() - outer,
+                                radial.center.y() - outer,
+                                outer * 2.0f,
+                                outer * 2.0f,
+                                0.0f,
+                                radial.image.imageId(),
+                                1.0f,
+                                result);
+                    } else {
+                        throw new OpenGlRenderException("Display paint was not prepared");
+                    }
                 }
                 if (stroke) {
                     nvgStrokePaint(context, result);
@@ -596,8 +612,8 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
             nvgLineJoin(context, NanoVgMappings.lineJoin(style.join()));
         }
 
-        private void drawTexture(DisplayCommand command) {
-            PreparedTexture texture = prepared.textures.get(command);
+        private void drawTexture() {
+            PreparedTexture texture = prepared.texture(textureIndex++);
             if (texture == null) {
                 return;
             }
@@ -801,34 +817,61 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
         }
 
         private void openClip(Path path) {
-            float[] transform = new float[6];
-            nvgCurrentTransform(context, transform);
-            endNanoVgFrame();
+            int depthIndex = clipDepth;
+            ClipLayer layer = acquireClipLayer(depthIndex);
+            layer.path = path;
+            clipDepth++;
+            try {
+                nvgCurrentTransform(context, layer.transform);
+                endNanoVgFrame();
 
-            int depthIndex = clips.size();
-            int parentFramebuffer = currentFramebuffer;
-            framebuffers.copyToLayer(parentFramebuffer, depthIndex);
-            int childFramebuffer = framebuffers.layerFramebuffer(depthIndex);
-            clips.addLast(new ClipLayer(path, transform, parentFramebuffer, childFramebuffer, depthIndex));
-            currentFramebuffer = childFramebuffer;
-            beginNanoVgFrame(true);
+                int parentFramebuffer = currentFramebuffer;
+                framebuffers.copyToLayer(parentFramebuffer, depthIndex);
+                int childFramebuffer = framebuffers.layerFramebuffer(depthIndex);
+                layer.parentFramebuffer = parentFramebuffer;
+                layer.depthIndex = depthIndex;
+                currentFramebuffer = childFramebuffer;
+                beginNanoVgFrame(true);
+            } catch (RuntimeException | Error failure) {
+                clipDepth--;
+                layer.clear();
+                throw failure;
+            }
         }
 
         private void closeClip() {
-            ClipLayer layer = clips.pollLast();
-            if (layer == null) {
+            if (clipDepth == 0) {
                 throw new OpenGlRenderException("NanoVG path clip stack underflow");
             }
-            endNanoVgFrame();
-            renderMask(layer);
-            drawCalls += compositor.composite(
-                    layer.parentFramebuffer,
-                    framebuffers.layerTexture(layer.depthIndex),
-                    framebuffers.maskTexture(),
-                    target.width(),
-                    target.height());
-            currentFramebuffer = layer.parentFramebuffer;
-            beginNanoVgFrame(true);
+            ClipLayer layer = clipLayers.get(--clipDepth);
+            try {
+                endNanoVgFrame();
+                renderMask(layer);
+                drawCalls += compositor.composite(
+                        layer.parentFramebuffer,
+                        framebuffers.layerTexture(layer.depthIndex),
+                        framebuffers.maskTexture(),
+                        target.width(),
+                        target.height());
+                currentFramebuffer = layer.parentFramebuffer;
+                beginNanoVgFrame(true);
+            } finally {
+                layer.clear();
+            }
+        }
+
+        private ClipLayer acquireClipLayer(int index) {
+            if (index == clipLayers.size()) {
+                clipLayers.add(new ClipLayer());
+            }
+            return clipLayers.get(index);
+        }
+
+        private void clearActiveClips() {
+            for (int index = 0; index < clipDepth; index++) {
+                clipLayers.get(index).clear();
+            }
+            clipDepth = 0;
         }
 
         private void renderMask(ClipLayer layer) {
@@ -853,7 +896,7 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
             nvgResetScissor(context);
             nvgGlobalAlpha(context, 1.0f);
             nvgGlobalCompositeOperation(context, NVG_SOURCE_OVER);
-            NanoVgPathReplay.replay(context, layer.path);
+            NanoVgPathReplay.replay(context, Objects.requireNonNull(layer.path, "clip path"));
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 nvgFillColor(context, nvgRGBAf(1.0f, 1.0f, 1.0f, 1.0f, NVGColor.calloc(stack)));
                 nvgFill(context);
@@ -932,63 +975,90 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
         }
     }
 
-    private static final class PreparedFrame {
-        private final IdentityHashMap<DisplayPaint, PreparedPaint> paints;
-        private final IdentityHashMap<DisplayCommand, PreparedTexture> textures;
+    static final class PreparedFrame {
+        private static final PreparedPaint[] NO_PAINTS = new PreparedPaint[0];
+        private static final PreparedTexture[] NO_TEXTURES = new PreparedTexture[0];
+        private static final PreparedFrame EMPTY = new PreparedFrame(Map.of(), NO_TEXTURES, 0);
+
+        private final Map<DisplayPaint, PreparedPaint> paints;
+        private final PreparedTexture[] textures;
+        private final int textureCount;
         private final PreparedPaint[] retainedPaints;
-        private final PreparedTexture[] retainedTextures;
 
         private PreparedFrame(
-                IdentityHashMap<DisplayPaint, PreparedPaint> paints,
-                IdentityHashMap<DisplayCommand, PreparedTexture> textures) {
+                Map<DisplayPaint, PreparedPaint> paints,
+                PreparedTexture[] textures,
+                int textureCount) {
             this.paints = paints;
             this.textures = textures;
-            retainedPaints = paints.values().toArray(PreparedPaint[]::new);
-            retainedTextures = textures.values().toArray(PreparedTexture[]::new);
+            this.textureCount = textureCount;
+            retainedPaints = paints.isEmpty()
+                    ? NO_PAINTS
+                    : paints.values().toArray(PreparedPaint[]::new);
         }
 
-        private static PreparedFrame prepare(
+        static PreparedFrame prepare(
                 DisplayList displayList,
                 NanoVgRenderResources resources,
                 NanoVgExternalImages externalImages,
                 NanoVgGradientCache gradients) {
-            IdentityHashMap<DisplayPaint, PreparedPaint> paints = new IdentityHashMap<>();
-            IdentityHashMap<DisplayCommand, PreparedTexture> textures = new IdentityHashMap<>();
-            for (DisplayCommand command : displayList.commands()) {
+            IdentityHashMap<DisplayPaint, PreparedPaint> paints = null;
+            PreparedTexture[] textures = null;
+            int textureCount = 0;
+            List<DisplayCommand> commands = displayList.commands();
+            for (int commandIndex = 0, size = commands.size(); commandIndex < size; commandIndex++) {
+                DisplayCommand command = commands.get(commandIndex);
                 DisplayPaint paint = paint(command);
-                if (paint != null) {
-                    paints.computeIfAbsent(paint, value -> preparePaint(value, gradients));
+                if (paint != null && requiresPreparation(paint)) {
+                    if (paints == null) {
+                        paints = new IdentityHashMap<>();
+                    }
+                    if (!paints.containsKey(paint)) {
+                        paints.put(paint, preparePaint(paint, gradients));
+                    }
                 }
+                PreparedTexture texture;
                 if (command instanceof DisplayCommand.DrawImage image) {
-                    textures.put(command, prepareImage(
+                    texture = prepareImage(
                             image.image(),
                             null,
                             image.destination(),
                             image.sampling(),
                             image.opacity(),
                             resources,
-                            externalImages));
+                            externalImages);
                 } else if (command instanceof DisplayCommand.DrawImageRegion image) {
-                    textures.put(command, prepareImage(
+                    texture = prepareImage(
                             image.image(),
                             image.source(),
                             image.destination(),
                             image.sampling(),
                             image.opacity(),
                             resources,
-                            externalImages));
+                            externalImages);
                 } else if (command instanceof DisplayCommand.DrawText text) {
-                    PreparedTexture preparedText = prepareText(
+                    texture = prepareText(
                             text.text(),
                             text.origin(),
                             resources,
                             externalImages);
-                    if (preparedText != null) {
-                        textures.put(command, preparedText);
-                    }
+                } else {
+                    continue;
                 }
+                if (textures == null) {
+                    textures = new PreparedTexture[4];
+                } else if (textureCount == textures.length) {
+                    textures = Arrays.copyOf(textures, Math.multiplyExact(textureCount, 2));
+                }
+                textures[textureCount++] = texture;
             }
-            return new PreparedFrame(paints, textures);
+            if (paints == null && textureCount == 0) {
+                return EMPTY;
+            }
+            return new PreparedFrame(
+                    paints == null ? Map.of() : paints,
+                    textures == null ? NO_TEXTURES : textures,
+                    textureCount);
         }
 
         private void retain(
@@ -1001,11 +1071,37 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
                     gradients.retain(radial.image);
                 }
             }
-            for (PreparedTexture texture : retainedTextures) {
+            for (int index = 0; index < textureCount; index++) {
+                PreparedTexture texture = textures[index];
                 if (texture != null) {
                     externalImages.retain(texture.image);
                 }
             }
+        }
+
+        private PreparedPaint paint(DisplayPaint paint) {
+            return paints.get(paint);
+        }
+
+        private PreparedTexture texture(int index) {
+            if (index < 0 || index >= textureCount) {
+                throw new OpenGlRenderException("Prepared texture sequence underflow");
+            }
+            return textures[index];
+        }
+
+        private void requireTexturesConsumed(int consumed) {
+            if (consumed != textureCount) {
+                throw new OpenGlRenderException("Prepared texture sequence was not fully consumed");
+            }
+        }
+
+        int preparedPaintCount() {
+            return paints.size();
+        }
+
+        int textureCommandCount() {
+            return textureCount;
         }
 
         private static DisplayPaint paint(DisplayCommand command) {
@@ -1024,34 +1120,29 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
             return null;
         }
 
+        private static boolean requiresPreparation(DisplayPaint paint) {
+            if (paint instanceof DisplayPaint.Solid) {
+                return false;
+            }
+            if (paint instanceof DisplayPaint.Linear linear) {
+                return !nativeStops(linear.stops());
+            }
+            if (paint instanceof DisplayPaint.Radial radial) {
+                return !nativeStops(radial.stops());
+            }
+            throw new OpenGlRenderException("Unsupported display paint: " + paint.getClass().getName());
+        }
+
         private static PreparedPaint preparePaint(
                 DisplayPaint paint,
                 NanoVgGradientCache gradients) {
-            if (paint instanceof DisplayPaint.Solid solid) {
-                return new SolidPrepared(solid.color());
-            }
             if (paint instanceof DisplayPaint.Linear linear) {
-                if (nativeStops(linear.stops())) {
-                    return new NativeLinearPrepared(
-                            linear.start(),
-                            linear.end(),
-                            first(linear.stops()),
-                            last(linear.stops()));
-                }
                 return new ImageLinearPrepared(
                         linear.start(),
                         linear.end(),
                         gradients.linearImage(linear.stops()));
             }
             if (paint instanceof DisplayPaint.Radial radial) {
-                if (nativeStops(radial.stops())) {
-                    return new NativeRadialPrepared(
-                            radial.center(),
-                            radial.innerRadius(),
-                            radial.outerRadius(),
-                            first(radial.stops()),
-                            last(radial.stops()));
-                }
                 float ratio = radial.outerRadius() == 0.0f
                         ? 0.0f
                         : radial.innerRadius() / radial.outerRadius();
@@ -1077,8 +1168,10 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
             NanoVgRenderResources.Image resolved = Objects.requireNonNull(
                     resources.resolveImage(image, sampling),
                     "resources.resolveImage()");
-            ImageInfo declared = image.info().orElseThrow(
-                    () -> new OpenGlRenderException("Image dimensions are unavailable for " + image.key()));
+            ImageInfo declared = image.info().orElse(null);
+            if (declared == null) {
+                throw new OpenGlRenderException("Image dimensions are unavailable for " + image.key());
+            }
             if (declared.width() != resolved.width() || declared.height() != resolved.height()) {
                 throw new OpenGlRenderException("Resolved image dimensions do not match " + image.key());
             }
@@ -1199,29 +1292,8 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
     }
 
     private sealed interface PreparedPaint permits
-            SolidPrepared,
-            NativeLinearPrepared,
-            NativeRadialPrepared,
             ImageLinearPrepared,
             ImageRadialPrepared {
-    }
-
-    private record SolidPrepared(PremultipliedColor color) implements PreparedPaint {
-    }
-
-    private record NativeLinearPrepared(
-            Point start,
-            Point end,
-            PremultipliedColor first,
-            PremultipliedColor last) implements PreparedPaint {
-    }
-
-    private record NativeRadialPrepared(
-            Point center,
-            float innerRadius,
-            float outerRadius,
-            PremultipliedColor first,
-            PremultipliedColor last) implements PreparedPaint {
     }
 
     private record ImageLinearPrepared(
@@ -1249,15 +1321,15 @@ public final class NanoVgGl3Renderer implements AutoCloseable {
             boolean snapToDevicePixels) {
     }
 
-        private record StateMarker(int clipCount, int historySize) {
-        }
+    private static final class ClipLayer {
+        private final float[] transform = new float[6];
+        private Path path;
+        private int parentFramebuffer;
+        private int depthIndex;
 
-    private record ClipLayer(
-            Path path,
-            float[] transform,
-            int parentFramebuffer,
-            int childFramebuffer,
-            int depthIndex) {
+        private void clear() {
+            path = null;
+        }
     }
 
     private record RenderCounts(int operations, int drawCalls) {

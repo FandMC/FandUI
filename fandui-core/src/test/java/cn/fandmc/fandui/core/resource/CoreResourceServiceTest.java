@@ -5,6 +5,7 @@ import cn.fandmc.fandui.api.resource.ImageInfo;
 import cn.fandmc.fandui.api.resource.ResourceKind;
 import cn.fandmc.fandui.api.resource.ResourceSource;
 import cn.fandmc.fandui.api.resource.ResourceState;
+import cn.fandmc.fandui.api.text.FontFamilies;
 import cn.fandmc.fandui.core.runtime.UiThreadDispatcher;
 import org.junit.jupiter.api.Test;
 
@@ -27,6 +28,29 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoreResourceServiceTest {
+    @Test
+    void publishesDefensiveFontSnapshotsAndReservesTheDefaultFamily() {
+        TestDispatcher dispatcher = new TestDispatcher();
+        CoreResourceService resources = new CoreResourceService(dispatcher);
+        UiKey key = UiKey.of("test", "fonts/custom.ttf");
+        byte[] source = new byte[]{1, 2, 3, 4};
+
+        assertSame(FontFamilies.DEFAULT, resources.font(FontFamilies.DEFAULT.key()));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> resources.registerFont(FontFamilies.DEFAULT.key(), ResourceSource.bytes(source)));
+        resources.registerFont(key, ResourceSource.bytes(source));
+        assertEquals(1L, resources.reload(ResourceLookup.empty()));
+
+        FontResourceSnapshot snapshot = resources.fontSnapshot();
+        assertEquals(1L, snapshot.generation());
+        assertFalse(snapshot.contentFingerprint().isBlank());
+        byte[] exposed = snapshot.copyFonts().get(key);
+        exposed[0] = 99;
+        assertArrayEquals(source, snapshot.copyFonts().get(key));
+        resources.close();
+    }
+
     @Test
     void internsRefsAndPreservesExactRegistrationOwnershipAcrossThreads() throws Exception {
         TestDispatcher dispatcher = new TestDispatcher();
@@ -140,6 +164,70 @@ class CoreResourceServiceTest {
                 },
                 pixels);
         assertEquals(List.of("0->1"), notifications);
+        resources.close();
+    }
+
+    @Test
+    void decodesRegisteredSvgOnTheDedicatedWorkerWithViewBoxNormalization() throws Exception {
+        TestDispatcher dispatcher = new TestDispatcher();
+        CoreResourceService resources = new CoreResourceService(dispatcher);
+        UiKey key = UiKey.of("test", "textures/vector.svg");
+        var image = resources.image(key);
+        resources.registerImage(key, ResourceSource.svg("""
+                <svg viewBox="10 20 2 1">
+                  <rect x="10" y="20" width="2" height="1" fill="#ff0000"/>
+                </svg>
+                """));
+
+        resources.reload(ResourceLookup.empty());
+
+        assertEquals(ResourceState.READY, image.state());
+        assertEquals(Optional.of(new ImageInfo(2, 1)), image.info());
+        ImageRaster raster = resources.resolveImage(image);
+        byte[] pixels = new byte[raster.byteSize()];
+        raster.pixels().get(pixels);
+        assertArrayEquals(new byte[]{(byte) 255, 0, 0, (byte) 255,
+                (byte) 255, 0, 0, (byte) 255}, pixels);
+        resources.close();
+    }
+
+    @Test
+    void autoDetectsSvgAndAppliesInheritedOpacity() throws Exception {
+        TestDispatcher dispatcher = new TestDispatcher();
+        CoreResourceService resources = new CoreResourceService(dispatcher);
+        UiKey key = UiKey.of("test", "textures/opaque.svg");
+        var image = resources.image(key);
+        resources.registerImage(key, ResourceSource.bytes("""
+                <svg viewBox="0 0 4 4">
+                  <g opacity="0.5"><rect width="4" height="4" fill="#ff0000"/></g>
+                </svg>
+                """.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+
+        resources.reload(ResourceLookup.empty());
+
+        byte[] pixels = new byte[resources.resolveImage(image).byteSize()];
+        resources.resolveImage(image).pixels().get(pixels);
+        int alpha = Byte.toUnsignedInt(pixels[3]);
+        assertTrue(alpha >= 126 && alpha <= 129);
+        assertEquals(alpha, Byte.toUnsignedInt(pixels[0]));
+        resources.close();
+    }
+
+    @Test
+    void usesExplicitPixelDimensionsWhenSvgAlsoDeclaresAViewBox() throws Exception {
+        TestDispatcher dispatcher = new TestDispatcher();
+        CoreResourceService resources = new CoreResourceService(dispatcher);
+        UiKey key = UiKey.of("test", "textures/sized.svg");
+        var image = resources.image(key);
+        resources.registerImage(key, ResourceSource.svg("""
+                <svg width="8px" height="4px" viewBox="0 0 2 1">
+                  <rect width="2" height="1" fill="blue"/>
+                </svg>
+                """));
+
+        resources.reload(ResourceLookup.empty());
+
+        assertEquals(Optional.of(new ImageInfo(8, 4)), image.info());
         resources.close();
     }
 

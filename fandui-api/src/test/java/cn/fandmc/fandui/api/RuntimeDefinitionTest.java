@@ -31,6 +31,37 @@ class RuntimeDefinitionTest {
         assertTrue(available.available());
         assertEquals(UiCapabilities.of(true, false), UiCapabilities.of(true, false));
         assertSame(starting, new UiUnavailableException(starting).availability());
+
+        UiDiagnostics detached = UiDiagnostics.detached(
+                UiRendererBackend.OPENGL,
+                "minecraft-opengl",
+                16_384,
+                "waiting for target");
+        UiDiagnostics attached = new UiDiagnostics(
+                UiRendererBackend.OPENGL,
+                "minecraft-opengl",
+                true,
+                1920,
+                1080,
+                UiColorFormat.RGBA8_UNORM,
+                16_384,
+                true,
+                true,
+                "ready");
+        assertFalse(detached.targetReady());
+        assertTrue(attached.targetReady());
+        assertEquals(16_384, attached.maximumTextureSize());
+        assertThrows(IllegalArgumentException.class, () -> new UiDiagnostics(
+                UiRendererBackend.OPENGL,
+                "minecraft-opengl",
+                false,
+                1920,
+                1080,
+                UiColorFormat.RGBA8_UNORM,
+                16_384,
+                false,
+                false,
+                "invalid"));
     }
 
     @Test

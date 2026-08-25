@@ -4,6 +4,7 @@ import cn.fandmc.fandui.api.layout.Size;
 import cn.fandmc.fandui.api.text.TextLayout;
 import cn.fandmc.fandui.api.text.TextLine;
 import cn.fandmc.fandui.api.text.TextRequest;
+import cn.fandmc.fandui.core.resource.FontResourceSnapshot;
 
 import java.util.List;
 import java.util.Objects;
@@ -13,16 +14,19 @@ final class SkijaTextLayout implements TextLayout {
     private final TextRequest request;
     private final TextCacheKey cacheKey;
     private final LayoutMetrics metrics;
+    private final FontResourceSnapshot fontResources;
 
     SkijaTextLayout(
             SkijaTextService owner,
             TextRequest request,
             TextCacheKey cacheKey,
-            LayoutMetrics metrics) {
+            LayoutMetrics metrics,
+            FontResourceSnapshot fontResources) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.request = Objects.requireNonNull(request, "request");
         this.cacheKey = Objects.requireNonNull(cacheKey, "cacheKey");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
+        this.fontResources = Objects.requireNonNull(fontResources, "fontResources");
     }
 
     @Override
@@ -70,5 +74,9 @@ final class SkijaTextLayout implements TextLayout {
 
     LayoutMetrics metrics() {
         return metrics;
+    }
+
+    FontResourceSnapshot fontResources() {
+        return fontResources;
     }
 }

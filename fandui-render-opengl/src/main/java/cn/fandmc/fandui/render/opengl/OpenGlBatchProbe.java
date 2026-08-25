@@ -119,18 +119,23 @@ public final class OpenGlBatchProbe implements AutoCloseable {
         if (firstRenderForTarget) {
             frameInfo = new OpenGlFrameInfo(target.width(), target.height(), 1.0f);
         }
-        textTextures.activate(TEXT_RASTERS);
-        imageTextures.activate(List.of(IMAGE_RASTER));
-        OpenGlRenderReport report = renderer.render(
-                host,
-                frameInfo,
-                DISPLAY_LIST,
-                renderResources());
-        renderedTarget = nextTarget;
-        if (firstRenderForTarget) {
-            verifyPixels(report, target);
+        OpenGlPassScope pass = OpenGlPassScope.open(host);
+        try {
+            textTextures.activate(TEXT_RASTERS);
+            imageTextures.activate(List.of(IMAGE_RASTER));
+            OpenGlRenderReport report = renderer.render(
+                    host,
+                    frameInfo,
+                    DISPLAY_LIST,
+                    renderResources());
+            renderedTarget = nextTarget;
+            if (firstRenderForTarget) {
+                verifyPixels(report, target);
+            }
+            return report;
+        } finally {
+            pass.close();
         }
-        return report;
     }
 
     private NanoVgRenderResources renderResources() {

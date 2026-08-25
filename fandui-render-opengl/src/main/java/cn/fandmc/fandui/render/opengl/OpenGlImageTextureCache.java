@@ -74,7 +74,7 @@ final class OpenGlImageTextureCache implements ImageTextureStore {
 
         Set<Long> nextActive = Set.copyOf(required.keySet());
         evictFor(missingBytes, nextActive);
-        List<Long> created = new ArrayList<>();
+        List<Long> created = new ArrayList<>(required.size());
         try {
             for (ImageRaster raster : required.values()) {
                 if (entries.containsKey(raster.textureKey())) {
@@ -83,12 +83,18 @@ final class OpenGlImageTextureCache implements ImageTextureStore {
                 int textureId = driver.create(raster);
                 Entry entry = new Entry(textureId, raster);
                 entries.put(raster.textureKey(), entry);
-                textureBytes = Math.addExact(textureBytes, entry.byteSize);
                 created.add(raster.textureKey());
+                textureBytes = Math.addExact(textureBytes, entry.byteSize);
             }
-        } catch (RuntimeException exception) {
+        } catch (RuntimeException | Error exception) {
+            activeRasters = null;
+            activeKeys = Set.of();
             for (Long key : created) {
-                deleteEntry(key);
+                try {
+                    deleteEntry(key);
+                } catch (RuntimeException cleanupFailure) {
+                    exception.addSuppressed(cleanupFailure);
+                }
             }
             throw exception;
         }
@@ -124,10 +130,6 @@ final class OpenGlImageTextureCache implements ImageTextureStore {
             throw new OpenGlRenderException(
                     "Active FandUI image texture is missing: " + Long.toUnsignedString(textureKey));
         }
-        if (!driver.isLive(entry.textureId)) {
-            throw new OpenGlRenderException("FandUI image texture is not live: " + entry.textureId);
-        }
-        driver.configureSampling(entry.textureId, sampling);
         return Optional.of(new OpenGlTexture(entry.textureId));
     }
 
@@ -191,11 +193,7 @@ final class OpenGlImageTextureCache implements ImageTextureStore {
     interface TextureDriver {
         int create(ImageRaster raster);
 
-        void configureSampling(int textureId, OpenGlSampling sampling);
-
         void delete(int textureId);
-
-        boolean isLive(int textureId);
     }
 
     private static final class Entry {
@@ -241,18 +239,8 @@ final class OpenGlImageTextureCache implements ImageTextureStore {
         }
 
         @Override
-        public void configureSampling(int textureId, OpenGlSampling sampling) {
-            OpenGlTextureUploader.configureSampling(textureId, sampling);
-        }
-
-        @Override
         public void delete(int textureId) {
             OpenGlTextureUploader.delete(textureId);
-        }
-
-        @Override
-        public boolean isLive(int textureId) {
-            return OpenGlTextureUploader.isLive(textureId);
         }
     }
 }

@@ -3,8 +3,14 @@ package cn.fandmc.fandui.core.runtime;
 import cn.fandmc.fandui.api.UiCapabilities;
 import cn.fandmc.fandui.api.UiKey;
 import cn.fandmc.fandui.api.component.Button;
+import cn.fandmc.fandui.api.component.Checkbox;
+import cn.fandmc.fandui.api.component.Column;
+import cn.fandmc.fandui.api.component.ProgressIndicator;
 import cn.fandmc.fandui.api.component.ScrollContainer;
+import cn.fandmc.fandui.api.component.Slider;
 import cn.fandmc.fandui.api.component.Spacer;
+import cn.fandmc.fandui.api.component.Dropdown;
+import cn.fandmc.fandui.api.component.ToggleSwitch;
 import cn.fandmc.fandui.api.component.Text;
 import cn.fandmc.fandui.api.component.TextInput;
 import cn.fandmc.fandui.api.component.control.ScrollController;
@@ -188,6 +194,217 @@ class InteractiveComponentsTest {
         button.setEnabled(false);
         session.dispatch(new KeyEvent(Keys.SPACE, KeyAction.PRESS, Set.of(), 30L));
         assertEquals(2, clicks.get());
+        fixture.runtime.stop();
+    }
+
+    @Test
+    void checkboxSliderAndProgressShareStableControlSemantics() {
+        Fixture fixture = new Fixture(request -> CompletableFuture.failedFuture(
+                new AssertionError("Control test must not request text")));
+        AtomicInteger changes = new AtomicInteger();
+        Checkbox checkbox = Checkbox.text("enabled", 16.0f);
+        checkbox.onChange(changes::incrementAndGet);
+        Slider slider = Slider.builder()
+                .range(0.0, 10.0)
+                .value(5.0)
+                .step(1.0)
+                .build();
+        ProgressIndicator progress = ProgressIndicator.of(0.25);
+        Column root = Column.builder(checkbox, slider, progress).gap(4.0f).build();
+        CoreScreenSession session = fixture.open(root);
+        UiViewport viewport = new UiViewport(240.0f, 100.0f, 480, 200, 2.0f);
+        UiSceneFrame initial = fixture.frame(viewport, 1L);
+        assertTrue(initial.displayList().commands().stream()
+                .anyMatch(DisplayCommand.FillRoundedRect.class::isInstance));
+
+        assertTrue(session.dispatch(pointer(
+                PointerAction.DOWN,
+                new Point(10.0f, 10.0f),
+                Optional.of(PointerButton.PRIMARY),
+                Set.of(PointerButton.PRIMARY))));
+        assertTrue(session.dispatch(pointer(
+                PointerAction.UP,
+                new Point(10.0f, 10.0f),
+                Optional.of(PointerButton.PRIMARY),
+                Set.of())));
+        assertTrue(checkbox.checked());
+        assertEquals(1, changes.get());
+
+        assertTrue(session.focus().request(slider));
+        assertTrue(session.dispatch(new KeyEvent(Keys.RIGHT, KeyAction.PRESS, Set.of(), 20L)));
+        assertTrue(session.dispatch(new KeyEvent(Keys.RIGHT, KeyAction.REPEAT, Set.of(), 21L)));
+        assertEquals(7.0, slider.value());
+        slider.setValue(100.0);
+        assertEquals(10.0, slider.value());
+
+        progress.setProgress(-1.0);
+        assertEquals(0.0, progress.progress());
+        progress.setProgress(2.0);
+        assertEquals(1.0, progress.progress());
+        fixture.runtime.stop();
+    }
+
+    @Test
+    void sliderPublishesItsLogicalValueImmediatelyAndAnimatesItsVisualValue() {
+        Fixture fixture = new Fixture(request -> CompletableFuture.failedFuture(
+                new AssertionError("Slider test must not request text")));
+        AtomicReference<Double> published = new AtomicReference<>();
+        Slider slider = Slider.builder()
+                .range(0.0, 100.0)
+                .onValueChange(published::set)
+                .build();
+        fixture.open(slider);
+        UiViewport viewport = new UiViewport(200.0f, 40.0f, 400, 80, 2.0f);
+        long started = 1_000_000_000L;
+        float initialX = sliderThumbX(fixture.frame(viewport, started));
+
+        slider.setValue(100.0);
+        assertEquals(100.0, slider.value());
+        assertEquals(100.0, published.get());
+
+        float firstX = sliderThumbX(fixture.frame(viewport, started + 16_000_000L));
+        float secondX = sliderThumbX(fixture.frame(viewport, started + 32_000_000L));
+        float finalX = secondX;
+        for (int frame = 3; frame <= 8; frame++) {
+            finalX = sliderThumbX(fixture.frame(viewport, started + frame * 16_000_000L));
+        }
+        assertTrue(initialX < firstX);
+        assertTrue(firstX < secondX);
+        assertTrue(secondX < finalX);
+        assertEquals(176.0f, finalX, 0.001f);
+
+        slider.setRange(0.0, 200.0);
+        assertEquals(100.0, slider.value());
+        float rangeFirstX = sliderThumbX(fixture.frame(viewport, started + 144_000_000L));
+        assertTrue(rangeFirstX > 92.0f && rangeFirstX < 176.0f);
+        float resizedRangeX = rangeFirstX;
+        for (int frame = 10; frame <= 17; frame++) {
+            resizedRangeX = sliderThumbX(fixture.frame(viewport, started + frame * 16_000_000L));
+        }
+        assertEquals(92.0f, resizedRangeX, 0.001f);
+        fixture.runtime.stop();
+    }
+
+    @Test
+    void sliderContinuousDragPublishesImmediatelyAndKeepsVisualSmoothing() {
+        Fixture fixture = new Fixture(request -> CompletableFuture.failedFuture(
+                new AssertionError("Slider test must not request text")));
+        Slider slider = Slider.builder().range(0.0, 100.0).build();
+        CoreScreenSession session = fixture.open(slider);
+        UiViewport viewport = new UiViewport(200.0f, 40.0f, 400, 80, 2.0f);
+        long started = 1_000_000_000L;
+        fixture.frame(viewport, started);
+
+        assertTrue(session.dispatch(pointer(
+                PointerAction.DOWN,
+                new Point(16.0f, 20.0f),
+                Optional.of(PointerButton.PRIMARY),
+                Set.of(PointerButton.PRIMARY))));
+        float previousVisualX = 8.0f;
+        for (int frame = 1; frame <= 12; frame++) {
+            float pointerX = 16.0f + 14.0f * frame;
+            assertTrue(session.dispatch(pointer(
+                    PointerAction.MOVE,
+                    new Point(pointerX, 20.0f),
+                    Optional.empty(),
+                    Set.of(PointerButton.PRIMARY))));
+            double expectedValue = frame * (100.0 / 12.0);
+            assertEquals(expectedValue, slider.value(), 0.0001,
+                    "logical value must track the latest held-drag position");
+
+            float visualX = sliderThumbX(fixture.frame(
+                    viewport, started + frame * 16_000_000L));
+            float exactTargetX = 8.0f + 14.0f * frame;
+            assertTrue(visualX > previousVisualX,
+                    "visual thumb must advance on every held-drag frame");
+            assertTrue(visualX < exactTargetX,
+                    "held drag must preserve smoothing instead of snapping to the pointer");
+            previousVisualX = visualX;
+        }
+        assertEquals(100.0, slider.value(), 0.0001);
+        assertTrue(previousVisualX < 176.0f);
+
+        assertTrue(session.dispatch(pointer(
+                PointerAction.UP,
+                new Point(184.0f, 20.0f),
+                Optional.of(PointerButton.PRIMARY),
+                Set.of())));
+        float settledX = previousVisualX;
+        for (int frame = 13; frame <= 20; frame++) {
+            settledX = sliderThumbX(fixture.frame(
+                    viewport, started + frame * 16_000_000L));
+        }
+        assertEquals(176.0f, settledX, 0.001f);
+        fixture.runtime.stop();
+    }
+
+    @Test
+    void dropdownAndToggleSwitchRoutePointerAndKeyboardActions() {
+        Fixture fixture = new Fixture(request -> CompletableFuture.failedFuture(
+                new AssertionError("Dropdown text may remain unresolved in this interaction test")));
+        AtomicReference<String> selected = new AtomicReference<>();
+        Dropdown<String> dropdown = Dropdown.builder(List.of(
+                        Dropdown.Option.of("one", "One"),
+                        Dropdown.Option.of("two", "Two"),
+                        Dropdown.Option.disabled("disabled", "Disabled")))
+                .onChange(selected::set)
+                .build();
+        ToggleSwitch toggle = ToggleSwitch.of(false);
+        Column root = Column.builder(dropdown, toggle).gap(4.0f).build();
+        CoreScreenSession session = fixture.open(root);
+        UiViewport viewport = new UiViewport(240.0f, 160.0f, 480, 320, 2.0f);
+        UiSceneFrame collapsed = fixture.frame(viewport, 1L);
+        assertEquals(30.0f, session.layoutSnapshot().node(dropdown).orElseThrow().size().height());
+
+        // Open the trigger. The dropdown itself captures the pointer so the menu can
+        // receive the following release even though its text children are pass-through.
+        assertTrue(session.dispatch(pointer(
+                PointerAction.DOWN,
+                new Point(20.0f, 10.0f),
+                Optional.of(PointerButton.PRIMARY),
+                Set.of(PointerButton.PRIMARY))));
+        assertTrue(session.dispatch(pointer(
+                PointerAction.UP,
+                new Point(20.0f, 10.0f),
+                Optional.of(PointerButton.PRIMARY),
+                Set.of())));
+        assertTrue(dropdown.expanded());
+        fixture.frame(viewport, 1L);
+        assertEquals(30.0f, session.layoutSnapshot().node(dropdown).orElseThrow().size().height());
+        fixture.frame(viewport, 80_000_001L);
+        float openingHeight = session.layoutSnapshot().node(dropdown).orElseThrow().size().height();
+        assertTrue(openingHeight > 30.0f && openingHeight < 108.0f);
+        fixture.frame(viewport, 160_000_001L);
+        assertEquals(108.0f, session.layoutSnapshot().node(dropdown).orElseThrow().size().height());
+
+        // Trigger is 30 logical pixels high; the second option starts at y=30.
+        assertTrue(session.dispatch(pointer(
+                PointerAction.DOWN,
+                new Point(20.0f, 69.0f),
+                Optional.of(PointerButton.PRIMARY),
+                Set.of(PointerButton.PRIMARY))));
+        assertTrue(session.dispatch(pointer(
+                PointerAction.UP,
+                new Point(20.0f, 69.0f),
+                Optional.of(PointerButton.PRIMARY),
+                Set.of())));
+        assertEquals("two", selected.get());
+        assertEquals("two", dropdown.value().orElseThrow());
+
+        UiSceneFrame toggleOff = fixture.frame(viewport, 320_000_001L);
+        float offX = toggleThumbX(toggleOff);
+        assertEquals(6.0f, offX, 0.001f);
+        assertTrue(session.focus().request(toggle));
+        assertTrue(session.dispatch(new KeyEvent(Keys.SPACE, KeyAction.PRESS, Set.of(), 20L)));
+        assertTrue(toggle.selected());
+        float startX = toggleThumbX(fixture.frame(viewport, 320_000_001L));
+        float middleX = toggleThumbX(fixture.frame(viewport, 390_000_001L));
+        float endX = toggleThumbX(fixture.frame(viewport, 460_000_001L));
+        assertEquals(offX, startX, 0.001f);
+        assertTrue(middleX > startX && middleX < endX);
+        assertEquals(22.0f, endX, 0.001f);
+        assertTrue(session.dispatch(new KeyEvent(Keys.LEFT, KeyAction.PRESS, Set.of(), 21L)));
+        assertFalse(toggle.selected());
         fixture.runtime.stop();
     }
 
@@ -506,6 +723,28 @@ class InteractiveComponentsTest {
         return frame.displayList().commands().stream()
                 .filter(DisplayCommand.DrawText.class::isInstance)
                 .count();
+    }
+
+    private static float toggleThumbX(UiSceneFrame frame) {
+        return frame.displayList().commands().stream()
+                .filter(DisplayCommand.FillRoundedRect.class::isInstance)
+                .map(DisplayCommand.FillRoundedRect.class::cast)
+                .filter(fill -> fill.rect().width() > 10.0f && fill.rect().width() < 20.0f
+                        && fill.rect().height() > 10.0f && fill.rect().height() < 20.0f)
+                .map(fill -> fill.rect().x())
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static float sliderThumbX(UiSceneFrame frame) {
+        return frame.displayList().commands().stream()
+                .filter(DisplayCommand.FillRoundedRect.class::isInstance)
+                .map(DisplayCommand.FillRoundedRect.class::cast)
+                .filter(fill -> Math.abs(fill.rect().width() - 16.0f) < 0.001f
+                        && Math.abs(fill.rect().height() - 16.0f) < 0.001f)
+                .map(fill -> fill.rect().x())
+                .findFirst()
+                .orElseThrow();
     }
 
     private static DisplayCommand.DrawText onlyText(UiSceneFrame frame) {

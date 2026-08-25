@@ -32,6 +32,20 @@ dependencies {
     testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
 
+tasks.register("renderPreparationPerformanceProbe", JavaExec) {
+    group = "verification"
+    description = "Measures renderer display-list preparation time and allocation without running Minecraft."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = "cn.fandmc.fandui.render.opengl.OpenGlPreparationPerformanceProbe"
+    jvmArgs "-Xms512m", "-Xmx512m", "-XX:+UseG1GC", "-Xbatch"
+    doFirst {
+        String requested = providers.gradleProperty("fanduiProbeOutput")
+                .getOrElse("artifacts/fandui-render-preparation-baseline-20260824.csv")
+        systemProperty "fandui.probe.output", rootProject.file(requested).absolutePath
+    }
+}
+
 publishing {
     publications {
         mavenJava(MavenPublication) {

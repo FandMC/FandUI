@@ -13,6 +13,8 @@ import static org.lwjgl.opengl.GL30.*;
 
 final class NanoVgFramebuffers implements AutoCloseable {
     static final long DEFAULT_BYTE_LIMIT = 512L * 1024L * 1024L;
+    private static final float[] TRANSPARENT_COLOR = {0.0f, 0.0f, 0.0f, 0.0f};
+    private static final int[] ZERO_STENCIL = {0};
 
     private final long byteLimit;
     private TargetKey targetKey;
@@ -188,9 +190,8 @@ final class NanoVgFramebuffers implements AutoCloseable {
         glDisable(GL_SCISSOR_TEST);
         glColorMask(true, true, true, true);
         glStencilMask(0xff);
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClearStencil(0);
-        glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        glClearBufferfv(GL_COLOR, 0, TRANSPARENT_COLOR);
+        glClearBufferiv(GL_STENCIL, 0, ZERO_STENCIL);
     }
 
     void clearMask(int x, int y, int clearWidth, int clearHeight) {
@@ -208,17 +209,15 @@ final class NanoVgFramebuffers implements AutoCloseable {
         glScissor(x, y, clearWidth, clearHeight);
         glColorMask(true, true, true, true);
         glStencilMask(0xff);
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClearStencil(0);
-        glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        glClearBufferfv(GL_COLOR, 0, TRANSPARENT_COLOR);
+        glClearBufferiv(GL_STENCIL, 0, ZERO_STENCIL);
     }
 
     private void clearStencil(int framebuffer) {
         bind(framebuffer);
         glDisable(GL_SCISSOR_TEST);
         glStencilMask(0xff);
-        glClearStencil(0);
-        glClear(GL_STENCIL_BUFFER_BIT);
+        glClearBufferiv(GL_STENCIL, 0, ZERO_STENCIL);
     }
 
     private Framebuffer layer(int depthIndex) {
@@ -326,9 +325,10 @@ final class NanoVgFramebuffers implements AutoCloseable {
     }
 
     private static Framebuffer createOwned(int width, int height) {
-        int activeTexture = glGetInteger(GL_ACTIVE_TEXTURE);
+        boolean preserveBinding = !OpenGlPassScope.isActive();
+        int activeTexture = preserveBinding ? glGetInteger(GL_ACTIVE_TEXTURE) : GL_TEXTURE0;
         glActiveTexture(GL_TEXTURE0);
-        int previousTexture = glGetInteger(GL_TEXTURE_BINDING_2D);
+        int previousTexture = preserveBinding ? glGetInteger(GL_TEXTURE_BINDING_2D) : 0;
         int colorTexture = 0;
         int framebuffer = 0;
         int depthStencil = 0;
@@ -368,8 +368,10 @@ final class NanoVgFramebuffers implements AutoCloseable {
             complete = true;
             return new Framebuffer(framebuffer, colorTexture, depthStencil);
         } finally {
-            glBindTexture(GL_TEXTURE_2D, previousTexture);
-            glActiveTexture(activeTexture);
+            if (preserveBinding) {
+                glBindTexture(GL_TEXTURE_2D, previousTexture);
+                glActiveTexture(activeTexture);
+            }
             if (!complete) {
                 if (framebuffer != 0) {
                     glDeleteFramebuffers(framebuffer);
@@ -409,9 +411,10 @@ final class NanoVgFramebuffers implements AutoCloseable {
         if (!glIsTexture(target.colorTextureId())) {
             throw new OpenGlRenderException("Minecraft color handle is not a live OpenGL texture");
         }
-        int activeTexture = glGetInteger(GL_ACTIVE_TEXTURE);
+        boolean preserveBinding = !OpenGlPassScope.isActive();
+        int activeTexture = preserveBinding ? glGetInteger(GL_ACTIVE_TEXTURE) : GL_TEXTURE0;
         glActiveTexture(GL_TEXTURE0);
-        int previousTexture = glGetInteger(GL_TEXTURE_BINDING_2D);
+        int previousTexture = preserveBinding ? glGetInteger(GL_TEXTURE_BINDING_2D) : 0;
         try {
             glBindTexture(GL_TEXTURE_2D, target.colorTextureId());
             int level = target.mipLevel();
@@ -420,8 +423,10 @@ final class NanoVgFramebuffers implements AutoCloseable {
                     glGetTexLevelParameteri(GL_TEXTURE_2D, level, GL_TEXTURE_WIDTH),
                     glGetTexLevelParameteri(GL_TEXTURE_2D, level, GL_TEXTURE_HEIGHT));
         } finally {
-            glBindTexture(GL_TEXTURE_2D, previousTexture);
-            glActiveTexture(activeTexture);
+            if (preserveBinding) {
+                glBindTexture(GL_TEXTURE_2D, previousTexture);
+                glActiveTexture(activeTexture);
+            }
         }
     }
 

@@ -50,6 +50,7 @@ public final class Spacer extends UiComponent {
     }
 
     public void setPreferredSize(Size size) {
+        requireMutationThread();
         Objects.requireNonNull(size, "size");
         if (Float.compare(width, size.width()) != 0 || Float.compare(height, size.height()) != 0) {
             width = size.width();
@@ -63,6 +64,7 @@ public final class Spacer extends UiComponent {
     }
 
     public void setExpandWidth(boolean expandWidth) {
+        requireMutationThread();
         if (this.expandWidth != expandWidth) {
             this.expandWidth = expandWidth;
             invalidateLayout();
@@ -74,6 +76,7 @@ public final class Spacer extends UiComponent {
     }
 
     public void setExpandHeight(boolean expandHeight) {
+        requireMutationThread();
         if (this.expandHeight != expandHeight) {
             this.expandHeight = expandHeight;
             invalidateLayout();

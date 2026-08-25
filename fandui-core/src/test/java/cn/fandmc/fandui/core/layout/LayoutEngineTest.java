@@ -43,7 +43,10 @@ class LayoutEngineTest {
         assertEquals(List.of(first, second), snapshot.root().children().stream()
                 .map(LayoutNode::component)
                 .toList());
-        assertEquals(new Rect(2.0f, 3.0f, 20.0f, 20.0f), snapshot.root().children().get(0).sceneBounds());
+        LayoutNode firstNode = snapshot.root().children().get(0);
+        assertEquals(new Rect(2.0f, 3.0f, 20.0f, 20.0f), firstNode.sceneBounds());
+        assertEquals(new Rect(0.0f, 0.0f, 20.0f, 20.0f), firstNode.localBounds());
+        assertSame(firstNode.localBounds(), firstNode.localBounds());
         assertSame(second, snapshot.hitTest(new Point(10.0f, 10.0f)).orElseThrow());
         assertThrows(UnsupportedOperationException.class, () -> snapshot.paintOrder().clear());
     }

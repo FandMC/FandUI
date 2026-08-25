@@ -17,13 +17,13 @@ Minecraft、Fabric、LWJGL、NanoVG 和 Skija 类型限制在实现模块中。
 ## 能力
 
 - 可变组件树与不可变布局/DisplayList 帧快照
-- Box、Row、Column、Flexible、Stack、Positioned、Text、Image、Button、TextInput、ScrollContainer
+- Box、Row、Column、Flexible、Stack、Positioned、Text、Image、Button、TextInput、ScrollContainer、Checkbox、ToggleSwitch、Slider、Dropdown、ProgressIndicator、Icon、SvgIcon
 - Theme、Style、局部 Theme/方向作用域、transform-aware hit test
 - capture/target/bubble 事件、pointer capture、enter/leave、焦点、光标、剪贴板与 IME 事件
 - Skija Unicode shaping、中文/Emoji fallback、换行、基线、命中与编辑几何
 - NanoVG 路径、渐变、图片、Scissor、路径裁剪、描边和 backdrop blur
 - Minecraft Screen 与默认穿透、可显式交互的 HUD layer
-- 原子资源 generation、PNG decode、文字/图片有界 GPU cache
+- 原子资源 generation、PNG/SVG decode、文字/图片有界 GPU cache；内置矢量图标目录
 
 ## 当前渲染边界
 
@@ -55,6 +55,29 @@ OpenGL backend 时该实现才可用；当前没有 Vulkan renderer。运行代�
 
 该命令构建共享模块和三个独立 Fabric JAR，不启动 Minecraft。各版本产物位于对应模块的
 `build/libs/`。
+
+## 综合测试 UI
+
+内置测试界面默认关闭，不影响作为库 Mod 使用。开发时设置 `fandui.test.ui=true` 并启动任一
+版本，界面会在首个 client tick 自动打开；关闭后按 `F9` 可重新打开：
+
+```powershell
+$env:JAVA_TOOL_OPTIONS="-Dfandui.test.ui=true"
+./gradlew.bat :fandui-fabric-1.21.4:runClient --console=plain --max-workers=2
+```
+
+将模块名替换为 `fandui-fabric-1.20.1` 或 `fandui-fabric-26.2` 即可验证另外两个版本。
+该界面覆盖中英文与 CJK/Emoji fallback、Button/TextInput、Checkbox/ToggleSwitch、Slider、
+ProgressIndicator、Dropdown、58 个预设图标、inline SVG、SVG 资源图片、渐变、描边、三层圆角裁剪、
+Backdrop Blur、滚动，以及窗口 resize、GUI Scale 和资源 reload 后的自动重建。
+
+主面板的“浏览全部图标 · Icon gallery”按钮会打开独立的预设图标页；该页直接读取
+`Icons.all()`，显示全部常量名称与矢量预览，支持滚轮和按住拖动滚动，并可用顶部按钮返回综合测试页。
+
+测试面板主体本身是垂直 `ScrollContainer`：当逻辑视口不足以容纳内容时，可用滚轮或按住鼠标
+拖动页面；内容完整可见时最大偏移为 `0`，不会产生空滚动。底部日志区保留为独立的嵌套滚动
+容器。`ToggleSwitch` 的 thumb 使用 140 ms 过渡并默认留出 3 px 轨道内边距，`Dropdown` 使用
+160 ms 的高度揭示/收起与箭头翻转动画。
 
 ## API 兼容门禁
 

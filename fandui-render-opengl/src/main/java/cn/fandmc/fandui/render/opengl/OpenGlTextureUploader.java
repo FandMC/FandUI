@@ -1,6 +1,7 @@
 package cn.fandmc.fandui.render.opengl;
 
 import org.lwjgl.opengl.GL;
+import org.lwjgl.opengl.GLCapabilities;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
@@ -28,7 +29,6 @@ import static org.lwjgl.opengl.GL11.glBindTexture;
 import static org.lwjgl.opengl.GL11.glDeleteTextures;
 import static org.lwjgl.opengl.GL11.glGenTextures;
 import static org.lwjgl.opengl.GL11.glGetInteger;
-import static org.lwjgl.opengl.GL11.glIsTexture;
 import static org.lwjgl.opengl.GL11.glPixelStorei;
 import static org.lwjgl.opengl.GL11.glTexImage2D;
 import static org.lwjgl.opengl.GL11.glTexParameteri;
@@ -51,7 +51,24 @@ import static org.lwjgl.system.MemoryUtil.memAlloc;
 import static org.lwjgl.system.MemoryUtil.memFree;
 
 final class OpenGlTextureUploader {
+    private static GLCapabilities limitContext;
+    private static int maximumTextureSize;
+
     private OpenGlTextureUploader() {
+    }
+
+    static int maximumTextureSize() {
+        requireContext("texture size query");
+        GLCapabilities current = GL.getCapabilities();
+        if (limitContext != current) {
+            int queried = glGetInteger(GL_MAX_TEXTURE_SIZE);
+            if (queried < 1) {
+                throw new OpenGlRenderException("OpenGL reported an invalid maximum texture size");
+            }
+            limitContext = current;
+            maximumTextureSize = queried;
+        }
+        return maximumTextureSize;
     }
 
     static int create(
@@ -69,7 +86,7 @@ final class OpenGlTextureUploader {
         if (width < 1 || height < 1 || byteSize < 1 || source.remaining() != byteSize) {
             throw new OpenGlRenderException(description + " has invalid pixel dimensions");
         }
-        int maximumSize = glGetInteger(GL_MAX_TEXTURE_SIZE);
+        int maximumSize = maximumTextureSize();
         if (width > maximumSize || height > maximumSize) {
             throw new OpenGlRenderException(
                     description + " " + width + "x" + height
@@ -79,10 +96,10 @@ final class OpenGlTextureUploader {
         ByteBuffer pixels = memAlloc(byteSize);
         try {
             pixels.put(source.duplicate()).flip();
-            UploadState state = UploadState.capture();
+            UploadState state = OpenGlPassScope.isActive() ? null : UploadState.capture();
             int texture = 0;
             try {
-                state.prepare();
+                UploadState.prepareUpload();
                 texture = glGenTextures();
                 if (texture == 0) {
                     throw new OpenGlRenderException("OpenGL did not allocate " + description);
@@ -114,7 +131,9 @@ final class OpenGlTextureUploader {
                 }
                 throw exception;
             } finally {
-                state.restore();
+                if (state != null) {
+                    state.restore();
+                }
             }
         } finally {
             memFree(pixels);
@@ -124,8 +143,14 @@ final class OpenGlTextureUploader {
     static void configureSampling(int textureId, OpenGlSampling sampling) {
         Objects.requireNonNull(sampling, "sampling");
         requireContext("texture sampling update");
-        if (!glIsTexture(textureId)) {
-            throw new OpenGlRenderException("FandUI texture is not live: " + textureId);
+        if (textureId <= 0) {
+            throw new IllegalArgumentException("textureId must be positive");
+        }
+        if (OpenGlPassScope.isActive()) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, textureId);
+            setSamplingParameters(sampling);
+            return;
         }
         int activeTexture = glGetInteger(GL_ACTIVE_TEXTURE);
         glActiveTexture(GL_TEXTURE0);
@@ -141,10 +166,6 @@ final class OpenGlTextureUploader {
 
     static void delete(int textureId) {
         glDeleteTextures(textureId);
-    }
-
-    static boolean isLive(int textureId) {
-        return glIsTexture(textureId);
     }
 
     private static void setSamplingParameters(OpenGlSampling sampling) {
@@ -189,7 +210,7 @@ final class OpenGlTextureUploader {
                     glGetInteger(GL_UNPACK_SKIP_IMAGES));
         }
 
-        private void prepare() {
+        private static void prepareUpload() {
             glActiveTexture(GL_TEXTURE0);
             glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
             glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);

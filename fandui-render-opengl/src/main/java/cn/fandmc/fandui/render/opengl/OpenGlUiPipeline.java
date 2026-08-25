@@ -11,6 +11,13 @@ import cn.fandmc.fandui.core.resource.ImageRaster;
 import cn.fandmc.fandui.core.runtime.UiSceneFrame;
 import cn.fandmc.fandui.text.SkijaTextService;
 import cn.fandmc.fandui.text.TextRaster;
+import jdk.jfr.Category;
+import jdk.jfr.Event;
+import jdk.jfr.EventType;
+import jdk.jfr.Label;
+import jdk.jfr.Name;
+import jdk.jfr.StackTrace;
+import jdk.jfr.Threshold;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -23,6 +30,7 @@ import java.util.function.LongSupplier;
 
 /** Connects immutable UI frames to Skija resources and the stock LWJGL NanoVG GL3 backend. */
 public final class OpenGlUiPipeline implements AutoCloseable {
+    private static final EventType FRAME_EVENT_TYPE = EventType.getEventType(OpenGlFrameEvent.class);
     private final RenderHost host;
     private final ImageRasterResolver imageRasterizer;
     private final ImageTextureStore imageTextures;
@@ -36,6 +44,7 @@ public final class OpenGlUiPipeline implements AutoCloseable {
     private ReadyScene ready;
     private List<ImageRaster> activeImageRasters;
     private List<TextRaster> activeTextRasters;
+    private int maximumTextureSize;
     private boolean closed;
 
     public OpenGlUiPipeline(
@@ -74,53 +83,94 @@ public final class OpenGlUiPipeline implements AutoCloseable {
         Objects.requireNonNull(frames, "frames");
         requireOpenRenderThread();
 
-        validateFrames(viewport, frames);
-        if (frames.isEmpty() || minimized(viewport)) {
-            clearPendingText();
-            ready = null;
-            activateTextures(List.of(), List.of());
-            return Optional.empty();
+        OpenGlFrameEvent performanceEvent = FRAME_EVENT_TYPE.isEnabled() ? new OpenGlFrameEvent() : null;
+        if (performanceEvent != null) {
+            performanceEvent.sceneCount = frames.size();
+            performanceEvent.begin();
         }
 
-        long generation = resourceGeneration.getAsLong();
-        if (generation < 0L) {
-            throw new OpenGlRenderException("FandUI resource generation must not be negative");
-        }
-        ReadyScene currentReady = ready;
-        if (currentReady != null && currentReady.key.sameRasterInputs(viewport, frames, generation)) {
-            clearPendingText();
-            if (!currentReady.key.viewport.equals(viewport)) {
-                currentReady = currentReady.retarget(viewport);
-                ready = currentReady;
+        try {
+            validateFrames(viewport, frames);
+            if (frames.isEmpty() || minimized(viewport)) {
+                clearPendingText();
+                ready = null;
+                activateTextures(List.of(), List.of());
+                return Optional.empty();
             }
-        } else {
-            prepare(viewport, frames, generation);
-        }
 
-        currentReady = ready;
-        if (currentReady == null || !currentReady.key.viewport.equals(viewport)) {
-            return Optional.empty();
+            long generation = resourceGeneration.getAsLong();
+            if (generation < 0L) {
+                throw new OpenGlRenderException("FandUI resource generation must not be negative");
+            }
+            ReadyScene currentReady = ready;
+            if (currentReady != null && currentReady.key.sameDisplayLists(viewport, frames, generation)) {
+                clearPendingText();
+                if (!currentReady.key.viewport.equals(viewport)) {
+                    currentReady = currentReady.retarget(viewport);
+                    ready = currentReady;
+                }
+            } else {
+                if (performanceEvent != null) {
+                    performanceEvent.sceneChanged = true;
+                }
+                SceneKey key = new SceneKey(viewport, copyDisplayLists(frames), generation);
+                if (currentReady != null && currentReady.key.sameResourceInputs(key)) {
+                    clearPendingText();
+                    ready = currentReady.withScene(key);
+                } else if (currentReady != null && currentReady.key.sameTextRasterInputs(key)) {
+                    clearPendingText();
+                    publish(key, currentReady.texts);
+                } else {
+                    if (performanceEvent != null) {
+                        performanceEvent.resourcesChanged = true;
+                    }
+                    prepare(key);
+                }
+            }
+
+            currentReady = ready;
+            if (currentReady == null || !currentReady.key.viewport.equals(viewport)) {
+                if (performanceEvent != null) {
+                    performanceEvent.textPending = pendingText != null;
+                }
+                return Optional.empty();
+            }
+            OpenGlPassScope pass = OpenGlPassScope.open(host);
+            try {
+                activateTextures(currentReady.images.rasters, currentReady.texts.rasters);
+                return Optional.of(drawer.draw(
+                        host,
+                        currentReady.frameInfo,
+                        currentReady.displayList,
+                        currentReady.resources));
+            } finally {
+                pass.close();
+            }
+        } finally {
+            if (performanceEvent != null) {
+                performanceEvent.end();
+                performanceEvent.commit();
+            }
         }
-        activateTextures(currentReady.images.rasters, currentReady.texts.rasters);
-        return Optional.of(drawer.draw(
-                host,
-                currentReady.frameInfo,
-                currentReady.displayList,
-                currentReady.resources));
     }
 
-    private void prepare(
-            UiViewport viewport,
-            List<UiSceneFrame> frames,
-            long resourceGeneration) {
+    /** Returns the current OpenGL context limit, cached after the first Render Thread query. */
+    public int maxTextureSize() {
+        requireOpenRenderThread();
+        if (maximumTextureSize == 0) {
+            maximumTextureSize = OpenGlTextureUploader.maximumTextureSize();
+        }
+        return maximumTextureSize;
+    }
+
+    private void prepare(SceneKey key) {
         PendingTextScene pending = pendingText;
-        if (pending == null || !pending.key.sameRasterInputs(viewport, frames, resourceGeneration)) {
+        if (pending == null || !pending.key.sameTextRasterInputs(key)) {
             clearPendingText();
-            SceneKey key = new SceneKey(viewport, copyDisplayLists(frames), resourceGeneration);
             pending = PendingTextScene.start(key, textRasterizer);
             pendingText = pending;
-        } else if (!pending.key.viewport.equals(viewport)) {
-            pending.retarget(viewport);
+        } else {
+            pending.updateKey(key);
         }
         if (!pending.complete()) {
             return;
@@ -133,7 +183,10 @@ public final class OpenGlUiPipeline implements AutoCloseable {
         } catch (RuntimeException exception) {
             throw new OpenGlRenderException("Failed to rasterize FandUI text", unwrap(exception));
         }
-        SceneKey key = pending.key;
+        publish(pending.key, texts);
+    }
+
+    private void publish(SceneKey key, ResolvedTexts texts) {
         ResolvedImages images = resolveImages(key);
         requireDistinctTextureKeys(images.rasters, texts.rasters);
         ready = ReadyScene.create(
@@ -152,28 +205,17 @@ public final class OpenGlUiPipeline implements AutoCloseable {
     private ResolvedImages resolveImages(SceneKey key) {
         IdentityHashMap<ImageRef, ImageRaster> byImage = new IdentityHashMap<>();
         List<ImageRaster> rasters = new ArrayList<>();
-        for (DisplayList displayList : key.displayLists) {
-            for (DisplayCommand command : displayList.commands()) {
-                ImageRef image = null;
-                if (command instanceof DisplayCommand.DrawImage drawImage) {
-                    image = drawImage.image();
-                } else if (command instanceof DisplayCommand.DrawImageRegion drawImage) {
-                    image = drawImage.image();
-                }
-                if (image == null || byImage.containsKey(image)) {
-                    continue;
-                }
-                ImageRaster raster = imageRasterizer.resolve(image);
-                if (raster == null) {
-                    throw new OpenGlRenderException("Image raster is unavailable for " + image.key());
-                }
-                if (raster.resourceGeneration() != key.resourceGeneration) {
-                    throw new OpenGlRenderException(
-                            "Image raster generation does not match the submitted scene");
-                }
-                byImage.put(image, raster);
-                rasters.add(raster);
+        for (ImageRef image : key.imageRefs) {
+            ImageRaster raster = imageRasterizer.resolve(image);
+            if (raster == null) {
+                throw new OpenGlRenderException("Image raster is unavailable for " + image.key());
             }
+            if (raster.resourceGeneration() != key.resourceGeneration) {
+                throw new OpenGlRenderException(
+                        "Image raster generation does not match the submitted scene");
+            }
+            byImage.put(image, raster);
+            rasters.add(raster);
         }
         return new ResolvedImages(byImage, List.copyOf(rasters));
     }
@@ -251,6 +293,7 @@ public final class OpenGlUiPipeline implements AutoCloseable {
         ready = null;
         activeImageRasters = null;
         activeTextRasters = null;
+        maximumTextureSize = 0;
         if (primary != null) {
             throw primary;
         }
@@ -291,17 +334,29 @@ public final class OpenGlUiPipeline implements AutoCloseable {
         private final UiViewport viewport;
         private final List<DisplayList> displayLists;
         private final long resourceGeneration;
+        private final List<TextLayout> textLayouts;
+        private final List<ImageRef> imageRefs;
 
         private SceneKey(
                 UiViewport viewport,
                 List<DisplayList> displayLists,
                 long resourceGeneration) {
+            this(viewport, displayLists, resourceGeneration, extractRasterInputs(displayLists));
+        }
+
+        private SceneKey(
+                UiViewport viewport,
+                List<DisplayList> displayLists,
+                long resourceGeneration,
+                RasterInputs rasterInputs) {
             this.viewport = viewport;
             this.displayLists = displayLists;
             this.resourceGeneration = resourceGeneration;
+            textLayouts = rasterInputs.textLayouts;
+            imageRefs = rasterInputs.imageRefs;
         }
 
-        private boolean sameRasterInputs(
+        private boolean sameDisplayLists(
                 UiViewport nextViewport,
                 List<UiSceneFrame> frames,
                 long nextResourceGeneration) {
@@ -320,9 +375,64 @@ public final class OpenGlUiPipeline implements AutoCloseable {
             return true;
         }
 
-        private SceneKey retarget(UiViewport nextViewport) {
-            return new SceneKey(nextViewport, displayLists, resourceGeneration);
+        private boolean sameResourceInputs(SceneKey next) {
+            return sameTextRasterInputs(next)
+                    && sameIdentityOrder(imageRefs, next.imageRefs);
         }
+
+        private boolean sameTextRasterInputs(SceneKey next) {
+            return Float.compare(viewport.devicePixelRatio(), next.viewport.devicePixelRatio()) == 0
+                    && resourceGeneration == next.resourceGeneration
+                    && sameIdentityOrder(textLayouts, next.textLayouts);
+        }
+
+        private SceneKey retarget(UiViewport nextViewport) {
+            return new SceneKey(
+                    nextViewport,
+                    displayLists,
+                    resourceGeneration,
+                    new RasterInputs(textLayouts, imageRefs));
+        }
+
+        private static RasterInputs extractRasterInputs(List<DisplayList> displayLists) {
+            IdentityHashMap<TextLayout, Boolean> seenTexts = new IdentityHashMap<>();
+            IdentityHashMap<ImageRef, Boolean> seenImages = new IdentityHashMap<>();
+            List<TextLayout> texts = new ArrayList<>();
+            List<ImageRef> images = new ArrayList<>();
+            for (DisplayList displayList : displayLists) {
+                for (DisplayCommand command : displayList.commands()) {
+                    if (command instanceof DisplayCommand.DrawText text) {
+                        if (seenTexts.put(text.text(), Boolean.TRUE) == null) {
+                            texts.add(text.text());
+                        }
+                    } else if (command instanceof DisplayCommand.DrawImage image) {
+                        if (seenImages.put(image.image(), Boolean.TRUE) == null) {
+                            images.add(image.image());
+                        }
+                    } else if (command instanceof DisplayCommand.DrawImageRegion image) {
+                        if (seenImages.put(image.image(), Boolean.TRUE) == null) {
+                            images.add(image.image());
+                        }
+                    }
+                }
+            }
+            return new RasterInputs(List.copyOf(texts), List.copyOf(images));
+        }
+
+        private static boolean sameIdentityOrder(List<?> first, List<?> second) {
+            if (first.size() != second.size()) {
+                return false;
+            }
+            for (int index = 0; index < first.size(); index++) {
+                if (first.get(index) != second.get(index)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    private record RasterInputs(List<TextLayout> textLayouts, List<ImageRef> imageRefs) {
     }
 
     private record ReadyScene(
@@ -385,6 +495,19 @@ public final class OpenGlUiPipeline implements AutoCloseable {
                     texts,
                     resources);
         }
+
+        private ReadyScene withScene(SceneKey nextKey) {
+            return new ReadyScene(
+                    nextKey,
+                    new OpenGlFrameInfo(
+                            nextKey.viewport.logicalWidth(),
+                            nextKey.viewport.logicalHeight(),
+                            nextKey.viewport.devicePixelRatio()),
+                    DisplayList.combine(nextKey.displayLists),
+                    images,
+                    texts,
+                    resources);
+        }
     }
 
     private static final class PendingTextScene {
@@ -405,17 +528,12 @@ public final class OpenGlUiPipeline implements AutoCloseable {
             IdentityHashMap<TextLayout, CompletableFuture<TextRaster>> futures = new IdentityHashMap<>();
             List<TextLayout> order = new ArrayList<>();
             try {
-                for (DisplayList displayList : key.displayLists) {
-                    for (DisplayCommand command : displayList.commands()) {
-                        if (command instanceof DisplayCommand.DrawText text
-                                && !futures.containsKey(text.text())) {
-                            CompletableFuture<TextRaster> future = Objects.requireNonNull(
-                                    rasterizer.raster(text.text(), key.viewport.devicePixelRatio()),
-                                    "textRasterizer.raster()");
-                            futures.put(text.text(), future);
-                            order.add(text.text());
-                        }
-                    }
+                for (TextLayout layout : key.textLayouts) {
+                    CompletableFuture<TextRaster> future = Objects.requireNonNull(
+                            rasterizer.raster(layout, key.viewport.devicePixelRatio()),
+                            "textRasterizer.raster()");
+                    futures.put(layout, future);
+                    order.add(layout);
                 }
             } catch (RuntimeException | Error failure) {
                 futures.values().forEach(future -> future.cancel(false));
@@ -433,8 +551,8 @@ public final class OpenGlUiPipeline implements AutoCloseable {
             return true;
         }
 
-        private void retarget(UiViewport viewport) {
-            key = key.retarget(viewport);
+        private void updateKey(SceneKey key) {
+            this.key = key;
         }
 
         private ResolvedTexts finish() {
@@ -489,6 +607,25 @@ public final class OpenGlUiPipeline implements AutoCloseable {
             textTextures.activate(texts);
             activeTextRasters = texts;
         }
+    }
+
+    @Name("cn.fandmc.fandui.OpenGlFrame")
+    @Label("FandUI OpenGL Frame")
+    @Category("FandUI")
+    @StackTrace(false)
+    @Threshold("1 ms")
+    static final class OpenGlFrameEvent extends Event {
+        @Label("Scene Count")
+        public int sceneCount;
+
+        @Label("Scene Changed")
+        public boolean sceneChanged;
+
+        @Label("Resources Changed")
+        public boolean resourcesChanged;
+
+        @Label("Text Pending")
+        public boolean textPending;
     }
 
     private static Throwable unwrap(Throwable failure) {

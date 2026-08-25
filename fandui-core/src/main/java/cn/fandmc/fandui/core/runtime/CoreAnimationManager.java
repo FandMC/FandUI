@@ -6,6 +6,12 @@ import cn.fandmc.fandui.api.animation.AnimationHandle;
 import cn.fandmc.fandui.api.animation.AnimationManager;
 import cn.fandmc.fandui.api.animation.AnimationSpec;
 import cn.fandmc.fandui.api.session.SessionCloseReason;
+import jdk.jfr.Category;
+import jdk.jfr.Event;
+import jdk.jfr.EventType;
+import jdk.jfr.Label;
+import jdk.jfr.Name;
+import jdk.jfr.StackTrace;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -15,8 +21,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 final class CoreAnimationManager implements AnimationManager {
+    private static final EventType START_EVENT_TYPE = EventType.getEventType(AnimationStartEvent.class);
+
     private final AbstractCoreSession session;
     private final List<Handle> animations = new ArrayList<>();
+    private Handle[] animationSnapshot = new Handle[0];
 
     CoreAnimationManager(AbstractCoreSession session) {
         this.session = session;
@@ -29,6 +38,14 @@ final class CoreAnimationManager implements AnimationManager {
         session.requireActiveOperation();
         Handle handle = new Handle(spec, listener, session.runtime().now());
         animations.add(handle);
+        refreshSnapshot();
+        if (START_EVENT_TYPE.isEnabled()) {
+            AnimationStartEvent event = new AnimationStartEvent();
+            event.animationId = System.identityHashCode(handle);
+            event.startNanos = handle.startNanos;
+            event.durationNanos = handle.durationNanos;
+            event.commit();
+        }
         session.enterCallback();
         try {
             handle.emit(0.0);
@@ -43,9 +60,11 @@ final class CoreAnimationManager implements AnimationManager {
     }
 
     void tick(long nowNanos) {
-        for (Handle handle : List.copyOf(animations)) {
+        boolean prune = false;
+        Handle[] current = animationSnapshot;
+        for (Handle handle : current) {
             if (!handle.active()) {
-                animations.remove(handle);
+                prune = true;
                 continue;
             }
             try {
@@ -55,14 +74,34 @@ final class CoreAnimationManager implements AnimationManager {
                 session.requestClose(SessionCloseReason.FAILED, true);
                 throw exception;
             }
+            prune |= !handle.active();
+        }
+        if (prune) {
+            animations.removeIf(handle -> !handle.active());
+            refreshSnapshot();
         }
     }
 
+    int activeCount() {
+        return animationSnapshot.length;
+    }
+
     void closeForSession() {
-        for (Handle handle : List.copyOf(animations)) {
+        for (Handle handle : animationSnapshot) {
             handle.finish(AnimationEndReason.SESSION_CLOSED);
         }
         animations.clear();
+        animationSnapshot = new Handle[0];
+    }
+
+    private void remove(Handle handle) {
+        if (animations.remove(handle)) {
+            refreshSnapshot();
+        }
+    }
+
+    private void refreshSnapshot() {
+        animationSnapshot = animations.toArray(Handle[]::new);
     }
 
     private final class Handle implements AnimationHandle {
@@ -96,7 +135,7 @@ final class CoreAnimationManager implements AnimationManager {
         @Override
         public void close() {
             if (finish(AnimationEndReason.CANCELLED)) {
-                session.runtime().runCleanup(() -> animations.remove(this));
+                session.runtime().runCleanup(() -> remove(this));
             }
         }
 
@@ -112,7 +151,6 @@ final class CoreAnimationManager implements AnimationManager {
             if (!spec.infinite() && running >= totalDuration) {
                 emit(1.0);
                 finish(AnimationEndReason.COMPLETED);
-                animations.remove(this);
                 return;
             }
 
@@ -168,5 +206,20 @@ final class CoreAnimationManager implements AnimationManager {
             return Long.MAX_VALUE;
         }
         return value * multiplier;
+    }
+
+    @Name("cn.fandmc.fandui.CoreAnimationStart")
+    @Label("FandUI Animation Start")
+    @Category("FandUI")
+    @StackTrace(false)
+    static final class AnimationStartEvent extends Event {
+        @Label("Animation Identity")
+        public int animationId;
+
+        @Label("Monotonic Start")
+        public long startNanos;
+
+        @Label("Duration")
+        public long durationNanos;
     }
 }

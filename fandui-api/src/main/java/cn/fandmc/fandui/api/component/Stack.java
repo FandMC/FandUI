@@ -43,6 +43,7 @@ public final class Stack extends UiContainer {
     }
 
     public void setAlignment(Alignment value) {
+        requireMutationThread();
         Alignment checked = Objects.requireNonNull(value, "value");
         if (alignment != checked) {
             alignment = checked;

@@ -3,8 +3,8 @@
 > 用途：这是 FandUI 源码/API 追踪与设计设定的**持久工作记忆**，专门保存已确认事实、证据坐标、已否定路线、设计决定和未决问题；它不是只在阶段结束时生成一次的总结。  
 > 恢复规则：发生上下文压缩、模型切换或换会话后，必须先完整读取本文件，以“最新且优先级最高的后端决定”和状态词恢复现场，再继续第一个未完成项；不得仅凭旧对话重建结论。  
 > 更新规则：每得到一项会影响代码选择的源码/API 事实就立即落盘，不积攒到阶段结束；若临时文件可能消失，至少记录可重取坐标、版本/提交、哈希和关键字面结果。  
-> 状态：第一阶段设计已获用户确认并进入实现；公共 API、Core runtime、Skija text-block、static PNG 事务式资源管线、现成 `lwjgl-nanovg`/`NanoVGGL3` OpenGL renderer、Backdrop Blur，以及三版 Fabric runtime/Screen/HUD/input/resource reload bridge 均已实现。共享完整 Demo Screen、纯 Core 交互回归和三版本真实 Demo 运行均已完成；2026-08-23 审计发现的首发 API 正确性问题已经修正，README/API Guide/Javadoc、`0.1.0` 预发布 ABI baseline 和三版本内嵌 API 一致性门禁已经闭合。1.20.1 右半屏纯 Blur HUD 压测已经进入世界，并完成第一批 GPU ROI、mask 与零透明度性能优化；下一步转入全 renderer/Core 性能审计。  
-> 最后更新：2026-08-23 19:21（Asia/Shanghai）
+> 状态：第一阶段设计已获用户确认并进入实现；公共 API、Core runtime、Skija text-block、PNG/SVG 事务式资源管线、现成 `lwjgl-nanovg`/`NanoVGGL3` OpenGL renderer、Backdrop Blur，以及三版 Fabric runtime/Screen/HUD/input/resource reload bridge 均已实现。共享完整 Demo Screen、纯 Core 交互回归和三版本真实 Demo 运行均已完成；2026-08-23 审计发现的首发 API 正确性问题已经修正，README/API Guide/Javadoc、`0.1.0` 预发布 ABI baseline 和三版本内嵌 API 一致性门禁已经闭合。1.20.1 右半屏纯 Blur HUD 已完成第一批 GPU ROI、mask 与零透明度优化。2026-08-24 横向审计已闭合组件树原子替换、自定义字体 generation/native 环境淘汰、动态 renderer diagnostics、首批交互控件、预设图标和受限 SVG 支持；三个版本共用的 F9 综合测试 Screen 已通过 Core、全量门禁以及 1.20.1/1.21.4/26.2 真实客户端重开和 resize。每帧同步 `glGet*` 导致的 OpenGL stall 已改为三版宿主规范状态交接；关闭诊断断言后的 1.21.4 JFR 中 P50/P95/P99 分别降至 `0.358647/0.699874/0.871980 ms`，诊断断言路径仍保留。Slider 按住连续拖动已改为每帧最新 MOVE + 单个可持续重定向的视觉平滑驱动，测试 UI 不再在每个拖动值上重排状态文字；有效实机 JFR 中动画启动 `41 -> 1`、整页 Layout 帧 `240 -> 2`。Core 事件路由已复用 path/state scratch，监听器缓存命中不再创建复合 key；嵌套派发保持独立状态和回调上下文失效语义。
+> 最后更新：2026-08-24 23:02（Asia/Shanghai）
 
 ## 0. 快速恢复点
 
@@ -54,7 +54,8 @@
 - 三版 vanilla 开发客户端在显式 GL probe/state assertion 下均完成最终 GUI hook、初始 attach、resize 后重新 attach、正常停止前资源释放和零 GL error 验证；三版相同 fixture 的最终结果均为 `28 batches / 31 draw calls / 854x480`，分别使用 FBO `2/3/4`；本机 RenderDoc 未安装，实际 OpenGL 抓帧仍未开始；
 - 运行时 renderer 已迁移为版本匹配的 LWJGL `NanoVGGL3`；路径回放、复用 layer/mask、渐变缓存、外部文字/图片纹理、Backdrop Blur、状态恢复和 Minecraft 主颜色目标重挂接均在 `fandui-render-opengl`，临时 FUDL/FUBT、自有 JNI/CMake 和 batch shader 已从源码/构建移除；
 - 共享 `FandUiDemoScreen` 已实现中英日法混排与 Emoji、圆角半透明 Blur 面板、描边、内置 PNG、至少三层裁剪、Button、TextInput 和 ScrollContainer；仅 `-Dfandui.demo.screen=true` 启用，首次自动打开并可用 `F8` 重开，默认发布运行不注册其资源或按键；
-- Gradle `9.5.1` + Loom `1.17.19` 的最近全量结果为 `37` 个 XML suite、`159 tests / 0 failures / 0 errors / 0 skipped`；`buildAll --no-build-cache --max-workers=2` 字面 `BUILD SUCCESSFUL in 27s`。严格 japicmp 检查相对 `0.1.0` 预发布 baseline 为 `No changes`；三个发布 JAR 各嵌入 `214` 个逐 class SHA-256 完全一致的公共 API class。
+- 共享 `FandUiTestScreen` 已覆盖首批全部控件、预设/inline SVG、SVG resource image、渐变、描边、三层圆角裁剪、Backdrop Blur、滚动与响应式布局；仅 `-Dfandui.test.ui=true` 启用，首次自动打开并由三个 Fabric bridge 分别以 `F9` 上升沿重开；
+- Gradle `9.5.1` + Loom `1.17.19` 的最新全量结果为 `42` 个 XML suite、`203 tests / 0 failures / 0 errors / 0 skipped`（历史首批结果为 `37 suites / 159 tests`）；严格 japicmp 检查相对 `0.1.0` 预发布 baseline 只报告已接受的 additive API，未报告 source/binary incompatibility；baseline 不因常规构建自动替换。三个发布 JAR 的内嵌公共 API class 数量随首批控件、diagnostics 和 SVG API 增至 `246`，逐 class SHA-256 仍完全一致。
 
 ### 当前实现待办
 
@@ -77,6 +78,15 @@
 - [ ] Sodium/Iris/Indium 及 Lithium/FerriteCore/Krypton 的版本组合运行矩阵；
 - [ ] Linux/macOS/Windows arm64 等 native classifier、干净机提取与发布验证；
 - [x] `0.1.0` 预发布 API baseline、公开 Javadoc/使用文档和严格 source/binary 兼容审计；baseline 只有在明确接受 API 变更时才允许通过 `updateApiBaseline` 更新。
+- [x] 单子组件保持“始终恰有一个 child”，并提供失败不丢旧 child 的原子替换语义；
+- [x] 将 `registerFont` 发布的 generation 字体快照真正接入 Skija `TypefaceFontProvider`，覆盖 reload、旧 layout raster/editor geometry 和 native 环境淘汰；
+- [x] 增加独立、动态、任意线程可读的 renderer diagnostics，不继续膨胀稳定 input capabilities；
+- [x] 首批高层控件：Checkbox、Slider、ProgressIndicator、ToggleSwitch、Dropdown，共享 control state、主题 token、键盘/指针语义；
+- [x] 预设矢量图标、inline `Icon`/`SvgIcon` 与安全有界 SVG path 解析；
+- [x] SVG image resource reload：自动/显式格式提示、worker 栅格化、premultiplied RGBA8、texture key 与原子 generation；
+- [x] 三版本 F9 综合测试 Screen：共享实现、Core 回归、三版编译、全量门禁、真实 F9 重开和窗口 resize 均已完成；
+- [ ] 横向性能证据：OpenGL 每帧 `glGet*` stall 已移出正常路径，Core route path/state scratch 与 listener cache key 已收敛；`CallbackContext`、hit-test、DisplayList 重建、文字/图片/gradient/blur cache 和长期 native/GPU 生命周期仍待继续量化；
+- [ ] 三版本一致性门禁：相同公共 API、PRESS/REPEAT/RELEASE、click count、resize/GUI Scale、reload；真实客户端项目继续单列验收。
 
 ## 1. 文档更新协议
 
@@ -149,7 +159,7 @@ Component Tree
 
 ### 2.1 可行性结论
 
-**总体结论：架构可行，三版本 OpenGL GPU go/no-go 和首个可运行 MVP 已完成。** 公共 UI、布局、DisplayList、Skija text-block raster、static PNG 资源、现成 NanoVGGL3 renderer、Backdrop Blur 和三版 Minecraft 主目标接入均已有构建、运行或像素读回证据；剩余发布风险集中在 RenderDoc、优化 Mod 组合、长期性能/显存和跨平台验收。
+**总体结论：架构可行，三版本 OpenGL GPU go/no-go 和首个可运行 MVP 已完成。** 公共 UI、布局、DisplayList、Skija text-block raster、PNG/SVG 资源、现成 NanoVGGL3 renderer、Backdrop Blur 和三版 Minecraft 主目标接入均已有构建、运行或像素读回证据；SVG 资源当前已有 Core 单元像素证据，真实资源包/不同 SVG 资产的客户端验收仍待补充。剩余发布风险集中在 RenderDoc、优化 Mod 组合、长期性能/显存和跨平台验收。
 
 | 范围 | 结论 | 放行条件 |
 |---|---|---|
@@ -1584,7 +1594,7 @@ public interface ResourceReloadListener {
 
 新 resource generation 只有在全部必需 source、图片 decode、字体注册和 fallback 验证成功后才原子 apply；全局 reload 失败时不递增 generation，也不调用成功 listener。已有旧有效内容的 ref 继续保持旧 generation 的 `READY` 与旧 metadata，不能因候选 generation 失败而谎报 `FAILED`；从未成功解析的 ref 才按本次确定结果进入 `MISSING`（不存在）或 `FAILED`（读取、解码或校验失败）。`ImageRef.info()` 是任意线程可读快照，width/height 必须为正；`ImageInfo` 是不可变 value class，并实现基于 width/height 的 value equality。ref 从不暴露 texture id、pixels 或 decoder object。
 
-MVP image codec 只接受 static PNG。reload worker 使用 JDK ImageIO 解码到规范化 sRGB ARGB，再用整数公式 `(channel * alpha + 127) / 255` 转成 RGBA8 premultiplied；alpha 为零时 RGB 强制为零，上传后按 premultiplied texture 采样。JPEG、WebP、GIF/APNG animation 和 SVG 不进入首版；错误签名、无 image、非正尺寸、维度/decoded-byte budget 超限均使候选资源失败。精确维度与 byte budget 在压力原型测得基线后冻结，不提前虚构数值。
+历史结论（已被 2026-08-24 实现取代）：首版 image codec 只接受 static PNG。当前资源 codec 仍拒绝 JPEG、WebP、GIF/APNG animation 和视频，但新增了受限 SVG：reload worker 通过 `ResourceFormat` 提示或 signature 自动选择 SVG，安全解析后以 Java2D 一次性栅格化为 premultiplied RGBA8；编码上限 2 MiB、最大边长 4096、解码上限 64 MiB。inline SVG 则保持矢量 path，不创建纹理。PNG 原有 signature/chunk/CRC/APNG/尺寸预算校验不变。
 
 文字 API 保存 shaping/layout 请求和纯 Java metrics，Skija 对象完全停留在 `fandui-text-skija`：
 
@@ -2218,7 +2228,7 @@ Mixin 常量池的静态锚点扫描确认：旧两版 Sodium 在 `Minecraft.run
 4. Skija 负责显式字体栈、Paragraph shaping/layout、CPU text-block raster 与 A8/RGBA atlas 输入；首版 bundled correctness fallback 为已锁定的 Noto CJK/Emoji 文件；
 5. 第 7 节的 component/layout/style/event/focus/animation/Canvas/resource/text 边界作为第一版实现输入，但在 Java 17 编译探针通过前仍可做保持语义的小幅签名修正，不提前承诺发布后的二进制冻结；
 6. 实施严格按“空构建矩阵 -> 三版本 OpenGL 主颜色重挂接/D24S8/resize/state restore 风险原型 -> API/core/canvas/text -> Fabric bridge -> Demo/验收”推进；GPU hard-stop 条件触发时先回到设计，不用第二 context、离屏跨 API 合成或接管世界 renderer 绕过；
-7. 图片 MVP 为 static PNG，文字/图片/路径均按当前宿主 display-encoded SDR UNORM 数值约定和 premultiplied alpha 处理；未知 target format 明确诊断并跳过该次 FandUI 提交；
+7. 图片资源支持 static PNG 与受限 SVG；两者均在 reload worker 规范化为 premultiplied RGBA8，文字/图片/路径均按当前宿主 display-encoded SDR UNORM 数值约定处理；未知 target format 明确诊断并跳过该次 FandUI 提交；
 8. 第 12 节所有未勾选项继续保留为发布或阶段 gate，源码路径存在、构建成功和单机截图都不替代真实启动、GL debug、RenderDoc、组合兼容和压力证据。
 
 收到用户明确“确认第一阶段设计并进入实现”后，下一动作固定为复制已发现的 Gradle 9.5.1 Wrapper、创建 8 模块骨架，并只执行 P0 最小构建与 GPU 风险原型；不执行 Git commit、分支或 push。
@@ -2420,7 +2430,7 @@ Mixin 常量池的静态锚点扫描确认：旧两版 Sodium 在 `Minecraft.run
 - 补齐 pointer/scroll/key/text/composition/focus 事件 accessor、稳定 key/button value、modifier/action 枚举和 `EventContext.sceneToLocal`；事件只保存 scene 坐标，current-target local 坐标由 callback scope 的已提交逆变换计算；
 - 补齐 `TextController`、有向 UTF-16 selection 与单轴 `ScrollController` 的绑定、detach、clamp、通知和线程规则；固定 root viewport constraints、基础组件默认值、definition 的 shallow-immutable 边界和 framework-owned handle provenance；
 - 将 `VisualState` 收敛为 framework-created final snapshot，固定 Style/Theme 默认值与 token 身份、animation duration/easing、三层失败隔离和 opaque handle 校验规则；
-- 消除全局 `TextService` 对 session theme 的隐式依赖：`FontFamilies.DEFAULT` 只展开 bundled CJK/Emoji fallback，主题必须先解析成完整 `TextStyle`；图片 MVP 固定为 static PNG + ImageIO + RGBA8 premultiplied；
+- 消除全局 `TextService` 对 session theme 的隐式依赖：`FontFamilies.DEFAULT` 只展开 bundled CJK/Emoji fallback，主题必须先解析成完整 `TextStyle`；图片资源固定为 static PNG/受限 SVG + ImageIO/Java2D + RGBA8 premultiplied；
 - 移除会让物理比例影响逻辑布局的 `MeasureScope.devicePixelRatio()`，明确 scale/device generation 与当前 OpenGL 无热重建边界；同步修正 Skija pipeline 和 P1/P2 验收措辞；
 - 重新复核第一阶段 12 项交付与第 12 节清单，未完成项仍为 P0 `8`、P1 `7`、P2 `3`，合计 `18`。本轮仍只修改 `RESEARCH.md`，没有创建 Gradle、Java、native、Fabric 或 Mixin 文件，也没有执行 Git 操作。
 
@@ -2836,7 +2846,9 @@ Mixin 常量池的静态锚点扫描确认：旧两版 Sodium 在 `Minecraft.run
 - `ApiArchitectureTest` 的源码与 class constant-pool 门禁未发现 Minecraft、Fabric、Blaze3D、Skija、LWJGL 或 NanoVG 类型进入 `cn.fandmc.fandui.api.**`；Java 17 consumer gate 已存在；
 - FandAPI 中值得继续沿用的不是 801 个领域类型本身，而是单根入口、窄服务、不可变 definition 与 live registration 分离、精确所有权的 `AutoCloseable` handle、防御性复制、JSpecify 以及实现包隔离。FandUI 当前总体方向与这些规律一致。
 
-#### API 冻结前必须修正的已确认问题
+> 历史记录说明：下面的审计表保留最初发现时的证据和修正方向；其中已标记为后续日志已完成的条目不得再当作当前缺口。当前状态以本文件顶部“当前实现待办”和末尾最新日期条目为准。
+
+#### API 冻结前必须修正的已确认问题（历史快照）
 
 | 优先级 | 问题与源码证据 | 影响 | 修正方向 |
 |---|---|---|---|
@@ -2884,7 +2896,7 @@ Mixin 常量池的静态锚点扫描确认：旧两版 Sodium 在 `Minecraft.run
 - Compose/React 式 reconciliation、compiler plugin 或完整响应式 data binding；
 - CSS selector/cascade 引擎和通用 Cassowary constraint solver；
 - 任意 shader/raw triangle/raw GPU handle；
-- SVG/WebView、APNG/GIF 动画图片、任意视频；
+- WebView、APNG/GIF 动画图片、任意视频；高级 SVG filter/gradient/text/外部资源仍暂缓（基础 inline/resource SVG 已在 2026-08-24 实现）；
 - 在没有大列表基准前实现复杂 recycler；
 - 为尚未要求的 Vulkan 模式重新设计 renderer。
 
@@ -2994,3 +3006,180 @@ Mixin 常量池的静态锚点扫描确认：旧两版 Sodium 在 `Minecraft.run
 - `TextController.replace(TextSelection, String)` 公开已有内部任意范围替换能力，保持 UTF-16 boundary、surrogate 校验、监听器批次和 caret 语义；搜索替换、自动补全和外部编辑器不再需要访问 internal state。
 - `KeyEvent` 增加 `scanCode()` 与五参数构造器，旧四参数构造器保留并以 `-1` 表示未知；1.20.1、1.21.4 传入 Screen 的 `scanCode`，26.2 传入 `KeyEvent.scancode()`，三版一致。
 - API 测试覆盖任意范围替换、caret 位置、旧构造器兼容、scan code 保留和非法 sentinel。新增方法均为兼容性允许的 additive API，不更新 `0.1.0` baseline。
+
+### 2026-08-24：横向 API/正确性/性能审计批次启动
+
+- 用户要求停止“一次只找一个”的串行排查。本批审计范围固定为公共 API、组件树/Core、resource/Skija、OpenGL renderer、1.20.1/1.21.4/26.2 三个 bridge；每次修改仍以证据和测试闭合，但发现项集中列出并按依赖顺序连续处理；
+- 已完成第一组低风险高频路径修复：所有现有标准组件 setter 在写字段前执行 mutation-thread preflight；`UiContainer.children()` 改为结构变化时更新的 immutable snapshot；focus tab 排序从潜在 O(n²) 的 `indexOf` 比较改为稳定单键排序；event listener resolution、GLFW `KeyCode`/modifier、animation tick snapshot 均增加结构变化时失效的缓存；
+- 窄验证命令 `./gradlew.bat :fandui-api:test :fandui-core:test --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 43s`；这些修改尚未进入全仓 `--rerun-tasks` 与 `buildAll` 结论；
+- **已确认正确性缺口**：`Box`、`Button`、`ScrollContainer`、`Flexible`、`Positioned`、`ConstrainedBox`、`ThemeScope`、`DirectionScope` 继承公开 `remove/clear`，可被变为空容器；多个 `setChild` 先 remove 后 add，新 child 已有 owner 等失败会丢失旧 child。需要公共树 mutation 的 preflight + 原子 replace，并由单子组件锁定最小 child 数；
+- **已确认资源缺口**：`CoreResourceService.registerFont/reload` 已发布字体 bytes，但三个 bridge 只把 `resources::generation` 交给 `SkijaTextService`；`SkijaTextEngine` 仅注册 bundled CJK/Emoji，逻辑自定义 family alias 没有真实 typeface。需要 generation snapshot、Skija provider environment、旧 layout 对旧 generation 的可重建语义和有界 native environment cache；
+- **已确认诊断缺口**：稳定 `UiCapabilities` 只有 IME/repeat；缺少动态 backend、blur/stencil、目标格式/尺寸、最大纹理和 unavailable reason。26.2 的实际 backend 在最终 GUI hook 才能确认，因此诊断必须是动态 immutable snapshot，不能在 bootstrap 固化；
+- **已确认高层 API 缺口**：标准组件仍没有 Checkbox/Toggle、Slider、ProgressIndicator、overlay/dialog/tooltip、Grid/Wrap/virtual list、semantics/accessibility 和 rich spans。首批只实现 Checkbox、Slider、ProgressIndicator，并抽共享 control state/listener，避免复制 Button 的状态机；
+- **待 profiling 风险**：`GlStateSnapshot.recapture()` 每次提交存在大量同步 `glGet*`；Core event path/context、NanoVG clip/layer 仍有短命对象；text/image/gradient/blur cache 在 resize、resource churn 和长时间运行下尚缺 JFR/native/GPU 计数。没有测量证据前不删除宿主状态恢复，也不声称整机 FPS 收益；
+- 三版本规则继续同时适用：公共 API/核心实现完全共享；三个 Screen bridge 的 key repeat 已统一，后续 click count、resize/GUI Scale、reload 和控件输入测试必须覆盖三版编译与一致性门禁，不能以单版实现代替。
+
+### 2026-08-24：组件树、字体环境与动态 Renderer Diagnostics 闭合
+
+- 单子 wrapper 现在以 `minimumChildren=maximumChildren=1` 保持结构不变量，统一通过 `UiContainer.replace`/`setChild` 原子替换。失败的 parent/key/attach 校验会恢复旧 child、parent 和 immutable `children()` snapshot；普通 `Row/Column/Stack` 仍允许空状态。`clear()` 对单子 wrapper 的拒绝是刻意契约，不要求开发者手工 remove+add；
+- `structureChanging` 只处理 UI 生命周期回调对同一容器的重入，不承担并发同步。挂载树 mutation 已由 `ComponentBinding.assertUiThread()` 强制 UI 线程，新增真实跨线程测试确认第二线程 `add` 抛 `IllegalStateException` 且结构不变；未来并行渲染继续消费 immutable `UiSceneFrame/DisplayList`，不把 `ArrayList` 配合 `AtomicBoolean` 伪装成线程安全树；
+- `FontResourceSnapshot` 在构造与导出两端都深复制字体 bytes。`SkijaTextLayout` 保存 snapshot 而非 native handle；每个 Paragraph/raster 操作持有 `FontEnvironment.Lease`，LRU 上限为 `4`，淘汰只针对没有活跃 lease 的环境，忙碌环境延迟关闭；旧 layout 后续按 snapshot fingerprint 重建。新增回归同时覆盖旧 layout 的 raster、`hitTest`、`geometry`，以及无效字体 reload 保持旧 generation/layout 可用；
+- 公共 API 新增 `UiRendererBackend`、`UiColorFormat`、`UiDiagnostics` 和兼容 default `UiRuntime.diagnostics()`；Core 以 `AtomicReference` 发布任意线程可读 snapshot。三个 bridge 只在实际 FandUI pass 成功后上报 target ready、framebuffer 尺寸、`RGBA8_UNORM`、Stencil、Backdrop Blur 和缓存后的 `GL_MAX_TEXTURE_SIZE`；resize/target loss/failure/shutdown 清除 target-dependent 字段；
+- 26.2 继续在最终 GUI hook 读取实际 `DeviceInfo.backendName()`。OpenGL 走共享 renderer；Vulkan/未知 backend 发布对应诊断和原因后进入 `RENDERER_UNAVAILABLE`，不创建 fallback renderer。1.20.1/1.21.4 在 bootstrap 已知 OpenGL，但在 target 实际验证前保持 detached diagnostics；
+- 窄验证：`./gradlew.bat :fandui-api:test :fandui-core:test :fandui-text-skija:test --rerun-tasks --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 21s`、`14 actionable tasks: 14 executed`；`./gradlew.bat :fandui-render-opengl:test :fandui-fabric-1.20.1:compileJava :fandui-fabric-1.21.4:compileJava :fandui-fabric-26.2:compileJava --rerun-tasks --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 20s`、`15 actionable tasks: 15 executed`。全仓 `test/buildAll` 尚待本批最后执行。
+
+### 2026-08-24：字体 lease 与组件结构并发边界补强
+
+- `FontEnvironment` 新增可重入安全的 lease 计数和延迟关闭：淘汰扫描会跳过仍被 Paragraph/raster 操作使用的环境，lease 归还后再执行 native `FontCollection`、provider 和 custom typeface 关闭；`TextLayout` 仍只保存 immutable `FontResourceSnapshot`，所以布局对象本身不会悬挂 native 引用，也无需依赖不可控的 finalizer。`withEnvironment` 在 layout、raster、hit-test、geometry、font validation 五条路径统一套用 lease；
+- `UiContainer` 的结构 mutation 现在经过全局串行锁，`childrenSnapshot` 和 `UiComponent.parent` 以 volatile 发布；同容器生命周期回调重入标记改为 `ThreadLocal`，因此未来并发渲染只能读取 immutable snapshot，不能并发破坏可变树。已挂载树仍由 `ComponentBinding.assertUiThread()` 拒绝跨线程 mutation；
+- required single-child wrapper 的 `clear()` 继续拒绝，以免动态 UI 暴露非法空中间树；异常信息明确建议 `setChild(...)`，该操作通过 `replace` 原子完成。普通可空容器保留 `clear()`。API Guide 已同步写明两种语义；
+- 回归新增未挂载容器双线程并发 add，验证 200 个 child 全部保留；字体旧 generation 回归继续覆盖环境超过四代后的旧 layout raster/editor geometry，并用反射门禁确认 `SkijaTextLayout` 不持有 Skija native 字段。窄命令 `./gradlew.bat :fandui-api:test :fandui-text-skija:test --rerun-tasks --console=plain --max-workers=2` 已通过，完整 `test/check/buildAll` 待本批最后执行。
+
+### 2026-08-24：字体缓存竞态与 required-child 正向契约补强
+
+- 字体环境缓存新增独立 `fontEnvironmentLock`：环境 fingerprint 查找、退休环境剔除、lease 获取和 LRU 扫描在同一临界区完成；因此未来即使调用入口并行化，也不会在“查找到环境”与“获取 lease”之间拿到已退休的 `FontCollection`。lease 释放和 native close 仍保持延迟关闭，`SkijaTextLayout` 继续只持有不可变字体 bytes snapshot；trim 失败时会回收刚取得的 lease，并保留原始异常及关闭异常的 suppressed 链。
+- `FontEnvironment.Lease.close()` 使用 `AtomicBoolean`，跨线程重复关闭也只释放一次；`cacheStats()` 和 engine shutdown 对环境 map 使用同一锁。Skija engine 的 native Paragraph 操作仍由专属 worker thread 执行，锁只保护环境所有权，不把 Skija 本身宣称为通用多线程 API。
+- `UiContainerTest` 新增 required single-child 的成功 `setChild()` 路径回归；`clear()` 继续明确拒绝，避免动态树短暂暴露非法空 child，业务动态替换使用原子 `replace(0, child)`。
+- `./gradlew.bat :fandui-api:test :fandui-text-skija:test --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`BUILD SUCCESSFUL`；`40 suites / 188 tests / 0 failures / 0 errors / 0 skipped`。
+- `./gradlew.bat check --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`BUILD SUCCESSFUL`，`Verified 224 identical public API classes in all Fabric JARs`，japicmp source/binary incompatibility `0`，未更新 baseline。
+- `./gradlew.bat buildAll --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`BUILD SUCCESSFUL`，`59 actionable tasks`。未启动 Minecraft，未执行 Git commit/branch/push。
+
+### 2026-08-24：本批验证与文档同步
+
+- `./gradlew.bat test --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`27 actionable tasks`，`BUILD SUCCESSFUL`；全仓测试 XML 汇总为 `40 suites / 188 tests / 0 failures / 0 errors / 0 skipped`（Fabric 三版无 test source）；
+- `./gradlew.bat check --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`41 actionable tasks`，`BUILD SUCCESSFUL`；API Javadoc、published API documentation、embedded API consistency 均通过，三版 JAR 中逐 class 一致公共 API 数量为 `224`。japicmp 报告本轮 additive API，source/binary incompatibility 错误数为 `0`，未执行 baseline 更新；
+- `./gradlew.bat buildAll --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`59 actionable tasks`，`BUILD SUCCESSFUL`。本轮没有启动 Minecraft 客户端，也没有执行 Git commit/branch/push；
+- API Guide 已补充首批控件和三项边界：字体 lease/快照、未挂载树串行结构 mutation、required single-child `clear()` 的 `setChild` 原子替换契约。
+
+### 2026-08-24：SVG 公共 API 与资源管线实现
+
+- 公共 API 新增 `ResourceFormat` 与兼容的 `ResourceSource.format()` default 方法；`ResourceSource.svg(byte[]/String)`、`ResourceSource.png(byte[])` 使用防御性复制并发布显式格式提示，原有 lambda 与 `bytes(...)` 保持 `AUTO` 行为；三版 Fabric bridge 的 resource-pack lambda 无需改动，AUTO 会按 PNG signature 或 UTF-8 `<svg` 根元素选择解码器。
+- `IconDefinition.fromSvg`/`SvgIcon` 已覆盖有界 DOM 解析：禁止 DOCTYPE、外部实体、外部 DTD/schema；支持 `path`、基本形状、变换、viewBox 非零原点、继承 opacity、solid/rgb/rgba 颜色、stroke cap/join 和 `M/L/H/V/C/S/Q/T/A/Z`。`Icon` 直接回放 immutable Canvas path；`Icons` 提供常用检查、关闭、箭头、菜单、搜索、信息、警告、播放/暂停图标。
+- Core 新增 `ImageDecoder`、`SvgImageDecoder` 和共享 `ImageDecodeSupport`。SVG 只在 dedicated reload worker 上使用 Java2D/Path2D 栅格化；root 的正像素 `width`/`height`（可带 `px`）优先作为 intrinsic size，缺失或相对单位时按 viewBox 比例补齐，二者都不可用时使用 viewBox 向上取整，限制为编码 2 MiB、最大边长 4096、解码 64 MiB；输出与 PNG 相同的 premultiplied RGBA8、SHA-256 cache key、texture key 和 OpenGL texture LRU，不在 render thread 创建 Java2D 对象或重复栅格化。
+- 明确不支持的 SVG 资源特性：外部资源、`image`/`use`/`text`、filter、渐变引用、动画、脚本和外部 CSS。需要无损缩放的图标使用 inline `SvgIcon`；需要渐变/滤镜的资源转为 PNG 或使用 Canvas API。未知/损坏 SVG 会使候选 generation 回滚并保留旧 READY snapshot。
+- 新增回归：`ResourceSourceTest` 检查格式提示与防御性复制；`CoreResourceServiceTest` 检查显式 SVG、AUTO 探测、viewBox 原点归一化、继承 opacity、premultiplied 像素与 texture metadata；`ControlAndIconComponentTest` 检查 SVG path/颜色/安全边界。命令 `./gradlew.bat :fandui-api:test :fandui-core:test --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`BUILD SUCCESSFUL`。
+- 当前 SVG 待验证项：真实 Minecraft resource-pack 中的多资产 reload、不同 GUI Scale/resize 后纹理重建、Windows/Linux/macOS headless/runtime 的 Java2D 可用性、RenderDoc 中 SVG 纹理上传的单次生命周期；这些不通过单元测试虚构为已完成。
+
+### 2026-08-24：SVG 最终构建门禁
+
+- `./gradlew.bat test --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`BUILD SUCCESSFUL in 26s`，全仓 XML 汇总 `41 suites / 199 tests / 0 failures / 0 errors / 0 skipped`；Fabric 三版没有 test source。
+- `./gradlew.bat check --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`BUILD SUCCESSFUL in 55s`，API Javadoc、published documentation、japicmp source/binary compatibility 均通过；`verifyEmbeddedApiConsistency` 字面 `Verified 246 identical public API classes in all Fabric JARs`。
+- `./gradlew.bat buildAll --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`BUILD SUCCESSFUL in 1m 6s`，`59 actionable tasks`。最终 Fabric JAR：1.20.1 `35504392` bytes、1.21.4 `35506430` bytes、26.2 `35436283` bytes；未启动 Minecraft，也未执行 Git commit/branch/push。
+
+### 2026-08-24：SVG 解析边界加固
+
+- `SvgPathParser.numbers(...)` 现在逐段验证 token 之间的分隔符，不再接受数字之间的任意非法字符；图层预算改为允许恰好 `4096` 个 drawable，超过预算才失败。
+- SVG user-unit 长度支持无单位和 `px`，相对单位继续明确拒绝；transform 参数数量严格校验，避免宽松解析产生不同平台的几何结果。
+- 新增 API 回归覆盖 `px` 尺寸、非法数字分隔符和多余 transform 参数；此前的安全实体、viewBox、opacity、premultiplied 像素和事务式 reload 回归保持通过。
+
+### 2026-08-24：SVG 加固后的全量门禁
+
+- `./gradlew.bat check --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`BUILD SUCCESSFUL in 1m`，Javadoc、published documentation、japicmp 和三版嵌入 API 一致性均通过；报告字面为 `Verified 246 identical public API classes in all Fabric JARs`。
+- `./gradlew.bat buildAll --rerun-tasks --no-build-cache --console=plain --max-workers=2`：`BUILD SUCCESSFUL in 1m 18s`，`59 actionable tasks`；全仓 XML 汇总为 `41 suites / 200 tests / 0 failures / 0 errors / 0 skipped`。
+- 本次三个发布 JAR：1.20.1 `35504841` bytes / `BB461923092748CE3EB6D2A09661216ED38F270D03D39B4964AB71DC846CE960`；1.21.4 `35506879` bytes / `D5A7A12D1B837EE01FDBBCC7DDFE4093D7D1D2F4B6689E3FE24138A8567ADE11`；26.2 `35436732` bytes / `BD5C7E0ED6886A6EFF43874D858B66C432552737F71648E4EB8678F139B55249`。
+- 未启动 Minecraft 客户端，未执行 Git commit、branch、push 或清理操作；真实 resource-pack 多资产、跨平台 Java2D 和 RenderDoc 仍保持“待验证”。
+
+### 2026-08-24：三版本共享综合测试 Screen
+
+- 新增 `cn.fandmc.fandui.internal.demo.FandUiTestScreen`，由 `-Dfandui.test.ui=true` 独立启用；首次 client tick 自动打开，关闭后以 `F9` 上升沿重开。默认关闭时不注册测试 SVG 资源、tick listener 或 Screen，不改变库 Mod 的常规运行行为；
+- 三版本复用完全相同的 Core 组件树，Fabric 模块只保留宿主输入差异：1.20.1/1.21.4 调用已核验的 `InputConstants.isKeyDown(long,int)` 与 `Window.getWindow()`，26.2 调用 `InputConstants.isKeyDown(Window,int)`；
+- fixture 覆盖中英文、日文、韩文、Emoji fallback，Button/TextInput、Checkbox/ToggleSwitch、Slider/ProgressIndicator、Dropdown、预设 Icon、inline SVG、reload worker SVG 图片、圆角/描边/线性渐变、Backdrop Blur、三层路径裁剪、滚动及紧凑 viewport；
+- 新增 `FandUiTestScreenTest`，验证 SVG generation 发布、`960x720` 与 `360x240` 响应式边界、DisplayList blur/image/path/gradient/三层 clip，以及按钮、复选、开关、滑块、下拉、文字输入和滚动的 live state；定向测试字面 `BUILD SUCCESSFUL in 12s`；
+- 三版本联合 `compileJava --rerun-tasks --no-build-cache --max-workers=2` 字面 `BUILD SUCCESSFUL in 19s`、`8 actionable tasks: 8 executed`；
+- `./gradlew.bat check --rerun-tasks --no-build-cache --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 1m 20s`、`41 actionable tasks: 41 executed`；Javadoc、published API documentation、japicmp source/binary compatibility 和 `Verified 246 identical public API classes in all Fabric JARs` 均通过；
+- `./gradlew.bat buildAll --rerun-tasks --no-build-cache --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 1m 7s`、`59 actionable tasks: 59 executed`；全仓 XML 为 `41 suites / 199 tests / 0 failures / 0 errors / 0 skipped`；
+- 本次发布 JAR：1.20.1 `35517626` bytes / `4DCB01D217E7A3CFB65823A174D06B1F44DD8A7BB62E1C395B008F2CE3404A4F`；1.21.4 `35519652` bytes / `A78D43355B512B16F21F05ECA75A38C9C57652680BA07B49159B086B1A554C63`；26.2 `35449504` bytes / `85005A7946352E2DD99BD05C962DEB58F30DF76589D4338B2A86BECABC667CBE`。真实客户端验收随后单独记录。
+- 以 `JAVA_TOOL_OPTIONS=-Dfandui.test.ui=true -Dfandui.opengl.assertState=true` 启动 1.21.4；stderr 字面确认 client JVM 拿到两个 property。首次后台命令因子 PowerShell 引号解析没有传入 property，已只结束当次创建的 launcher tree 后重试，没有保留第二个客户端；
+- 重试 launcher PID 为 `10708`，Minecraft client PID 为 `26380`。日志确认测试入口安装、首次自动打开、最终 GUI hook、SVG/字体资源 generation `1`；初始正式 pass 为 `854x480 / 39 batches / 53 draw calls / FBO 3`；
+- 用户按 F9 后日志于 `16:31:02` 确认第二次 `FandUI opened the comprehensive test Screen`，当前目标重新挂接为 `1920x1121 / 58 batches / 72 draw calls / FBO 11`。针对 stdout/stderr 的 `FandUI failed`、`GL_INVALID`、state mismatch、Exception/ERROR 扫描为 `0`；客户端保持运行供交互、resize、GUI Scale 与 reload 检查。
+
+### 2026-08-24：综合测试 Screen 整页滚动与控件过渡
+
+- 用户实机指出综合页面不能滚动、`ToggleSwitch` 没有视觉过渡且白色 thumb 贴近轨道边缘、`Dropdown` 展开/收起没有视觉过渡。修复前客户端 PID `26380` 与 launcher PID `10708` 已通过窗口正常关闭并确认退出，没有强制终止；
+- 新增内部 `ScalarTransition`，统一复用 `ComponentContext.session().animations()`，不增加每控件 timer 或 Fabric/Minecraft 类型。目标变化会取消旧 handle 并从当前标量值继续，因此快速反向不会跳回端点；detach 会取消 session 动画；
+- `ToggleSwitch` 使用 140 ms `EASE_OUT` thumb 过渡，动画帧仅触发 paint invalidation；新增主题 token `THUMB_INSET`，默认 `3.0` 逻辑像素，使默认 38x22 track 中的 16px thumb 两端都保持 3px 间距；
+- `Dropdown` 使用 160 ms `EASE_OUT` 高度揭示/收起，箭头随同一标量平滑翻转；实现 `ContentClipProvider` 并以当前揭示高度裁剪 option，过渡帧只触发布局失效；
+- 综合测试面板的全部 content 外包一层垂直 `ScrollContainer`，底部日志区继续作为嵌套滚动 fixture。滚动范围仍按 `childExtent - viewportExtent` 自动计算，内容完整可见时不制造空偏移；测试改用 `960x520` 逻辑视口验证真实 overflow、滚轮消费、外层偏移和底部嵌套容器偏移；
+- 定向命令 `./gradlew.bat :fandui-api:test :fandui-core:test --rerun-tasks --no-build-cache --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 23s`，API/Core 共 `82 tests / 0 failures`；
+- 完整 `check` 字面 `BUILD SUCCESSFUL in 1m 45s`、`41 actionable tasks: 41 executed`，Javadoc、published API documentation、japicmp source/binary compatibility 均通过，且 `Verified 246 identical public API classes in all Fabric JARs`；
+- 完整 `buildAll` 字面 `BUILD SUCCESSFUL in 2m 56s`、`59 actionable tasks: 59 executed`；XML 汇总为 `41 suites / 199 tests / 0 failures / 0 errors / 0 skipped`；
+- 发布 JAR：1.20.1 `35521645` bytes / SHA-256 `B1CBA821D69750470DFEBB33B45C1BAC1693A71D5D297C2BC9EE71BF3B7C1518`；1.21.4 `35523671` / `4A53D384EC1A848FAEC75880BEBEAFA21937EFC431608C825CB282BA4D839566`；26.2 `35453523` / `3A31C6BC8B92245DB3A2051EABF67B8C44C24FE0C68D8D87B67E5621876FC271`；未执行 API baseline 更新或 Git 操作。
+- 新 1.21.4 客户端以 `-Dfandui.test.ui=true -Dfandui.opengl.assertState=true` 启动，Minecraft PID `16260`；测试 Screen 打开 `2` 次，资源 generation `1`。renderer 初次挂接为 `854x480 / 40 batches / 54 draw calls / FBO 3`，窗口变化后自动重建为 `1920x1121 / 41 batches / 55 draw calls / FBO 11`；`FandUI failed`、state mismatch、`GL_INVALID`、`OpenGlRenderException` 均为 `0`。宿主 OpenAL 设备打开失败仍单独存在，不属于 FandUI renderer；客户端保持运行供滚动与动画目视验收。
+
+### 2026-08-24 19:56：OpenGL 状态交接 stall 根因与三版本实机闭合
+
+- 基线录制为 `artifacts/fandui-1.21.4-dropdown-slider-release.jfr`，时长 `90s`，包含 `5160` 个 `cn.fandmc.fandui.OpenGlFrame`。通过 `jfr print --json` 和 PowerShell `ConvertFrom-Json` 解析得到最大帧 `269.577700ms`，共有 `5` 帧超过 `100ms`，其余四个峰值为 `247.04/209.60/208.60/184.84ms`；同一录制的 GC 最大停顿只有 `7.043100ms`。`jdk.NativeMethodSample` 的真实调用栈反复落在 `GL11C.glGetIntegerv -> GlStateSnapshot.recapture -> OpenGlUiPipeline.render`，因此“类似 GC”的偶发卡顿主因是每帧同步 OpenGL 状态查询，不是 Java GC；
+- 打开完整状态断言后，旧恢复路径曾字面报告以下进入值到恢复值差异：program `0 -> 3`、VAO `7 -> 0`、`ARRAY_BUFFER 9 -> 0`、texture unit 1 绑定 `5 -> 0`、clear color `[0.937,0.196,0.239,1] -> [0,0,0,0]`、depth test `false -> true`、stencil mask `-1 -> 255`。这证明 Minecraft 的 Java 侧缓存与 hook 处真实驱动状态并非可由一个固定“猜测恢复值”代表；
+- `RenderHost` 现提供窄的 `supportsStateHandoff/prepareStateForFandUi/restoreStateAfterFandUi` 契约。三个正式 Minecraft host 在 Pass 前把驱动和宿主缓存共同规范到已记录状态，Pass 后无查询恢复同一状态；`OpenGlPassScope` 正常发布路径不再执行 `GlStateSnapshot.recapture()`，只有显式 `-Dfandui.opengl.assertState=true` 或不支持交接的测试 host 才保留完整查询与 expected/actual 诊断。准备阶段抛错不会遗留 active singleton 状态；
+- 共享 `OpenGlStateHandoff` 统一恢复主 FBO/viewport/scissor、program/VAO/buffer、两个 texture unit/sampler、blend/depth/stencil/cull/sRGB/dither、pixel-store 等 FandUI 会触及的状态。depth 固定关闭，stencil write mask 使用完整 `~0`；不再覆盖宿主 clear color/clear stencil。`NanoVgFramebuffers` 改用 `glClearBufferfv/glClearBufferiv` 清理自有附件，避免借全局 clear 值；
+- 1.20.1/1.21.4 host 使用各自真实 Blaze3D `GlStateManager` 和 `BufferUploader.invalidate()` 同步 Java 缓存，保留 Minecraft shader texture 0；26.2 在相同 GL 状态同步外，通过 required Mixin accessor 取得 `CommandEncoder.backend`，并失效 `GlCommandEncoder.lastPipeline/lastProgram/lastVertexArray`。26.2 实机加载 required Mixin 成功，没有 accessor/mixin 应用错误；本机原版仍因 GTX 760 缺少 `VK_KHR_dynamic_rendering` 和 `dynamicRendering` 而选择 OpenGL，FandUI 没有切换后端；
+- 三版均以 `-Dfandui.test.ui=true -Dfandui.opengl.assertState=true` 启动最新类，并各自完成首次自动打开、Win32 真实 key-down/up 的 `Esc -> F9` 重开及窗口 resize。1.20.1 为 `854x480 / FBO 2 -> 1582x903 / FBO 11`；1.21.4 为 `854x480 / FBO 3`、重开 `855x481 / FBO 11`、resize `1582x903 / FBO 6`；26.2 为 `854x480 / FBO 4 -> 1582x903 / FBO 29`。三个日志的测试 Screen 打开次数均为 `2`，state mismatch、`GL_INVALID_*`、renderer failed/disabled 和 FandUI OpenGL error 合计均为 `0`；
+- 可复查运行日志：1.20.1 为 `10636` bytes / SHA-256 `28D87FAE1B2BB927A4272B003EFDAED5E8C9ABC16F18A5AD8509C8ECE1D45315`；1.21.4 为 `7963` / `ADBDCA9AF9D6F7586C6D123DDA5EEB58B085E55BA5570360C72585183F7A561D`；26.2 为 `11841` / `F5D7860895F0DBF20B966B599A22A0BEDCE027CB3A2DC15DE1F05BEA0370978A`；
+- `./gradlew.bat check buildAll --no-build-cache --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 52s`，`59 actionable tasks: 23 executed, 36 up-to-date`；测试 XML 为 `42 suites / 203 tests / 0 failures / 0 errors / 0 skipped`，三版发布 JAR 内 `246` 个公共 API class 逐字节一致。Javadoc 仍有既有 missing-comment 警告，但没有 doclint、测试、ABI 或打包失败；
+- 当前发布 JAR：1.20.1 `35533190` bytes / SHA-256 `5DAB70677111F8E4F499EE98B289E00BD9B53C6B38DDCD5153A2881A871CF09C`；1.21.4 `35535215` / `2849736200E0947543EB2A0CDBEC8D793E194A76295877C6FDAF0B73255F1990`；26.2 `35466766` / `76FAC96A80DFB0926F91C9871704AE0E59B9B879AE5CE596F71F9BDF5887C2BC`。未更新 API baseline，未执行 Git commit、branch、push 或 reset；
+- 这轮已经证明正常路径从“每帧完整 `glGet*`”变为“固定写入 + 缓存交接”，并消除了已定位 stall 的触发代码；开启状态断言本身仍会执行同步查询，只用于诊断，不作为最终性能路径。关闭断言后的同口径 JFR 已完成并记录在下一节；RenderDoc、长期 native/GPU 增长和优化 Mod 矩阵仍保持待验证。
+
+### 2026-08-24 20:20：状态交接无查询路径 JFR 与当前 UI 实测
+
+- 优化后录制为 `artifacts/fandui-1.21.4-state-handoff-zero-threshold-20260824-2011.jfr`，使用关闭 `fandui.opengl.assertState` 的发布路径和零时长阈值 JFC，时长 `30s`，SHA-256 为 `FAB059096FED4F08A345FA686D665247E8A2062F1832F81875DD985D7974BD19`；`jfr summary` 字面包含 `1739` 个 `cn.fandmc.fandui.OpenGlFrame` 和 `1389` 个 `jdk.NativeMethodSample`；
+- 使用 `jfr print --json`、PowerShell `ConvertFrom-Json` 和明确的 `PT...S -> ms` 换算重新计算得到：P50 `0.358647ms`、P95 `0.699874ms`、P99 `0.871980ms`、最大 `1.689598ms`，超过 `16.67ms` 和 `100ms` 的 FandUI frame 均为 `0`；唯一一次 GC pause 为 `6.020337ms`；逐个 native sample 检查 `GlStateSnapshot` 调用栈命中数为 `0`；
+- 同一解析方法重算旧基线 `artifacts/fandui-1.21.4-dropdown-slider-release.jfr`：`5160` 帧，P50 `2.292775ms`、P95 `3.746931ms`、P99 `4.587881ms`、最大 `269.577733ms`，超过 `16.67ms` 为 `6` 帧、超过 `100ms` 为 `5` 帧，GC 最大 `7.043160ms`，`4059` 个 native sample 中 `108` 个命中 `GlStateSnapshot` 调用栈；
+- 由未取整原值计算，P50/P95/P99/最大值分别降低 `84.36%/81.32%/80.99%/99.37%`。两次录制时长不同，因此这里只比较 frame duration 分布和同步查询调用栈，不以总帧数或总 sample 数声称吞吐变化；
+- 当前 1.21.4 客户端 PID `37828` 仅以 `-Dfandui.test.ui=true` 运行，未开启状态断言。日志于 `20:03:30` 记录 F9 显式打开综合测试 Screen，用户随后确认当前 UI 可见；因此“当前 UI 消失”不是现存事实。首次自动打开日志早于资源 generation `1` 仍是一个可观察时序，但在没有再次复现用户可见故障前不据此修改自动打开逻辑。
+
+### 2026-08-24 22:36：Slider 按住连续拖动路径闭合
+
+- 本节唯一验收对象是 Slider 主按钮按住后从 `0%` 连续拖到 `100%` 及快速往返；轨道单击、单点跳值和点击后过渡均不能代替该口径。视觉平滑必须保留，逻辑 `value()`/`onValueChange` 仍同步发布最新输入；
+- 基线 `artifacts/fandui-1.21.4-slider-continuous-before-clock-fix-25s.jfr` 为 `516654` bytes，SHA-256 `49E985A3DB7E6F0EA24A4174773C0D73E0CD6AF66F290D2445B30A7F712D737E`。真实窗口 RenderTarget 为 `1920x1121`，Slider 绝对物理坐标 `x=622..1298, y=491`；按住后执行 `16` 段往返，每段 `250ms / 676` 个连续位置。拖动区间有 `245` 个 CoreFrame/changed OpenGL frame、`41` 次动画启动，说明旧视觉追赶器约每 `96ms` 结束并重建一段动画；
+- `RetargetableScalarTransition` 现在只创建一个 infinite session animation 作为重绘驱动。视觉值在 `PaintScope.frameTimeNanos()` 上按响应半衰期连续采样，单帧时间步上限 `33.333334ms`，因此 hitch 后不会把视觉 thumb 直接跳到最新目标；连续 `setTarget` 只重定向，不排队、不重启动画。本帧刚收到新目标时禁止收敛关闭，避免慢速连续拖动在目标附近反复创建 handle；停止更新并收敛后仍主动关闭 driver；
+- 三版 Screen bridge 全部使用同一 `PointerMoveCoalescer`：`mouseMoved/mouseDragged` 只覆盖最新坐标，每个 UI render frame 最多 drain 一个 MOVE；button/scroll 前先 drain 以保持事件顺序。时间戳在 drain 时读取，原始高频 MOVE 不再逐个调用 `MonotonicClock` 的原子 CAS。1.20.1、1.21.4、26.2 已联合 `compileJava`，没有单版特例；
+- `InteractiveComponentsTest` 以 `12` 个连续 held-drag frame 从 `0%` 推到 `100%`：逐帧断言逻辑值立即更新、视觉位置单调推进但不 snap，释放后最终精确收敛。`RetargetableScalarTransitionTest` 额外使用 `10ms` 快响应和连续小目标证明同一次拖动只启动一个 driver；`PointerMoveCoalescerTest` 证明只投递每帧最新样本并保留跨帧总 delta；
+- profiling 还发现综合测试 UI 的 Slider listener 曾在每个值上 `String.format + status.setText`，令 `240/245` 个基线拖动帧触发整页 Layout。fixture 现只保持 Slider -> Progress 的高频 paint 联动，状态文字留给低频操作。最终有效录制 `artifacts/fandui-1.21.4-slider-continuous-after-paint-only-valid-25s.jfr` 为 `447289` bytes，SHA-256 `A4CED9F177482C919B04CFC4ED438D6DFE4637B759A0597F7063E66B50231762`：动画启动 `1`，CoreFrame `202`，其中 Layout `2`、paint-only `197`，GC `0`；Core duration P50/P95/max 为 `0.4516/1.7385/8.1569ms`，相对基线 `0.8246/2.7217/8.725ms`；
+- 最终录制的正常帧间隔 P50/P95 为 `16.7545/18.5701ms`。仍有四个 `190-283ms` 的整机渲染空洞；空洞内 Render-thread 的 `41` 个采样全部位于 Mojang/驱动路径：`28` 个为 `GLFW.glfwSwapBuffers -> Window.updateDisplay`，`13` 个为 `NativeImage._upload -> glTexSubImage2D`，没有 FandUI 栈。FandUI 无法在 Minecraft 没有产出帧时显示中间画面，但 `33.33ms` 时间步上限保证恢复后继续追随而不是一次跳完；
+- `artifacts/fandui-1.21.4-slider-continuous-after-persistent-driver-25s.jfr`（SHA-256 `69870B976595454892A21437EE6C381BABB07B52E6300DC24E2F6C5341FF5411`）发生在资源 reload 已替换首次自动 Screen 之后，CoreFrame/动画均为 `0`，明确标记为未命中 Slider 的无效样本，后续不得作为性能对照；中间有效但仍有状态文字联动的样本 SHA-256 为 `9DC4A2409487904064301A88C20F248D9A869B663F23D74D70CC6A3175CEE688`；
+- 定向验证命令 `./gradlew.bat :fandui-api:test :fandui-core:test :fandui-fabric-1.20.1:compileJava :fandui-fabric-1.21.4:compileJava :fandui-fabric-26.2:compileJava --console=plain` 字面 `BUILD SUCCESSFUL in 27s`；随后全仓 `./gradlew.bat check --no-build-cache --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 1m 21s`，三版发布 JAR 内 `246` 个公共 API class 一致。最新 1.21.4 客户端 PID `34804`，仅启用 `-Dfandui.test.ui=true`、未启用状态断言；资源 generation `1` 后已用 F9 打开 `1920x1121 / 41 batches / 54 draw calls / FBO 11` 测试 Screen。用户随后按住快速拖动并明确确认“不卡了”，因此自动连续重放与真实目视 held-drag 两条验收均已通过。
+
+### 2026-08-24 23:02：Core 事件路由稳态分配收敛
+
+- 对 Slider 最终有效录制 `artifacts/fandui-1.21.4-slider-continuous-after-paint-only-valid-25s.jfr` 重新执行 `jfr summary` 与 `jdk.ObjectAllocationSample` 栈筛选：录制共有 `13` 个 allocation sample，`CoreEventDispatcher`、`ListenerBucket`、`EventListeners`、`CallbackContext` 和 `HandlerKey` 均未命中；可见的 FandUI 分配样本落在 `RecordingCanvas2D.finish -> DisplayList.<init> -> List.copyOf`。这份采样不足以证明事件路径零分配，但把下一项优先级明确为先消除源码中确定存在的 route scratch，再单独处理 DisplayList；
+- `CoreEventDispatcher` 原先每次 `dispatchTo` 新建 `ArrayList` path 和 `DispatchState`。现在使用 session-owned、UI 线程限定的 `DispatchFrame` 池，复用 path backing array 与状态；池最多保留 `8` 个 frame，覆盖正常嵌套派发但不因异常递归无限保留。结果以 primitive bit flags 返回，frame 在成功、提前停止传播和异常路径都由 `finally` 清空后归还；
+- `ListenerBucket` 的缓存从每次查询创建 `HandlerKey(eventClass, route)` 改为以现成 `Class<?>` 为 key、一次生成 capture/bubble 两个 immutable snapshot。注册或注销 listener 会清空缓存；同一类型与 route 的稳定命中返回相同 snapshot，不再创建复合 key 或扫描 entries；
+- `CallbackContext` 刻意没有池化。公共契约要求上下文在 handler 返回后永久失效；若复用同一实例，被错误保留的旧引用可能在后续 handler 执行期间重新变为 active。当前仍每次 callback 创建独立上下文，以正确性换取这一项小对象分配，后续只有在不改变失效语义的设计下才继续优化；
+- 新增嵌套路由回归连续执行 `1,000` 次外层 KeyEvent 和 `1,000` 次内层 KeyEvent：最终只保留 `2` 个 route frame，内层 `consume()` 不污染外层 consumed/default 状态，内外层上下文在回调后均抛 `IllegalStateException`。`UiContainerTest` 同时锁定 listener snapshot 命中 identity 与 mutation 后重建；API/Core 定向结果为 `30 suites / 141 tests / 0 failures / 0 errors / 0 skipped`；
+- 三版本 `compileJava --rerun-tasks --no-build-cache --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 28s`、`8 actionable tasks: 8 executed`。最终 `./gradlew.bat check --rerun-tasks --no-build-cache --console=plain --max-workers=2` 字面 `BUILD SUCCESSFUL in 1m 36s`、`41 actionable tasks: 41 executed`；全仓 XML 为 `45 suites / 215 tests / 0 failures / 0 errors / 0 skipped`，japicmp 没有 source/binary incompatibility，三版发布 JAR 内 `246` 个公共 API class 逐 class 一致；
+- 本轮没有启动或重启 Minecraft，没有更新 API baseline，也没有执行 Git commit、branch、push、reset 或清理既有产物。下一项性能证据是 Paint-only 帧中的 immutable DisplayList 重建与 command 分配；在提出 fragment/subtree cache 前必须先建立 `100/1000` component fixture，分别量化静态、单控件动画和多控件动画，避免用破坏 `PaintScope.frameTimeNanos()` 语义的缓存换取表面数字。
+
+### 2026-08-24 23:37：Core Scene/DisplayList 分配基准与热路径优化闭合
+
+- 新增独立 Gradle 任务 `:fandui-core:coreScenePerformanceProbe`，只使用 test source set，不进入发布 JAR，也不挂到默认 `check`。任务固定 Java 17、G1、`512 MiB` heap 与 `-Xbatch`，通过 `com.sun.management.ThreadMXBean` 精确统计当前线程分配；fixture 覆盖 `100/1000` 个组件的静态帧、单组件 Paint 失效和全组件 Paint 失效，每项执行 5 组并取中位数；
+- 稳定优化前基线为 `artifacts/fandui-core-scene-before-stable-20260824.csv`，SHA-256 `00B81325ACCEB784B71C535178B2D7F33EE24F69B47AFFD116001E49E2D8323A`；最终结果为 `artifacts/fandui-core-scene-after-list-transfer-20260824.csv`，SHA-256 `A165481D16AA22EFA0F52C36D3EC6FD3EFD053C7210F193DCCE468A879248EF7`。两个文件均记录 Java/VM/OS/CPU/heap、迭代数、命令数、DisplayList identity 变化、每帧时间与分配，可由同一任务重跑，不使用 JMH 外部依赖；
+- 1000 组件 single-paint 的命令数由 `7006 -> 6005`（`-14.29%`），中位时间由 `278909.3 -> 196947.4 ns/frame`（`-29.39%`），分配由 `497440 -> 195832 B/frame`（`-60.63%`）；all-paint 中位时间由 `313657 -> 223443 ns/frame`（`-28.76%`），分配由 `497440 -> 195784 B/frame`（`-60.64%`）。静态场景继续复用同一 immutable DisplayList，identity 变化为 `0`，稳态约 `32 B/frame`；
+- `RecordingCanvas2D` 用 primitive array 保存 save-state id、clip depth 和 global alpha，替代每层 `StateFrame`/`ArrayDeque`；同一次 recording 的前两种 Paint 使用直接槽位，第三种起才延迟建立 HashMap；相同 global alpha 不再重复写命令，restore 会同步恢复 recorder 侧 alpha。32 层扩容、LIFO 失败、alpha save/restore 和相同 Paint identity 均有回归；
+- `LayoutNode` 在布局冻结时缓存不可变 local bounds，Scene paint 不再为每个组件每帧创建相同 `Rect`；`DisplayList` 构造器只接管 `RecordingCanvas2D` 不再使用的独占命令列表并包装 unmodifiable view，同时在一次线性扫描中校验 null 和计算 backdrop-blur 标志，避免 `List.copyOf` 的第二次数组复制；公共 `commands()` 仍不可修改，`DisplayList.combine` 的外部输入仍复制到自有列表；
+- 曾尝试把 `SceneCompiler` 的递归 frame state 改为手工 primitive bridge；同口径 probe 显示它阻碍 HotSpot 对原有短命 frame 对象的逃逸分析，没有稳定收益，因此实验代码和测试均已撤回。当前不引入 subtree DisplayList cache：通用组件允许读取 `PaintScope.frameTimeNanos()`，无显式失效的时间动画仍需逐帧 paint，缓存会改变公开语义；
+- 最终执行 `./gradlew.bat check --rerun-tasks --no-build-cache --console=plain --max-workers=2`，字面 `BUILD SUCCESSFUL in 1m 38s`、`41 actionable tasks: 41 executed`；XML 汇总为 `45 suites / 218 tests / 0 failures / 0 errors / 0 skipped`，japicmp、API Javadoc 和发布文档门禁通过，三个 Fabric JAR 内 `246` 个公共 API class 一致。未启动或重启 Minecraft，未更新 API baseline，也未执行 Git commit、branch、push、reset 或清理操作；下一项以长期 GPU/native 生命周期和图片、文字、gradient、blur cache 的有界性为对象建立证据。
+
+### 2026-08-25 00:02：GPU cache 有界性审计与失败事务修复
+
+- 当前显式 GPU 上限为：image texture `128 MiB`、text texture `64 MiB`、gradient lookup texture `16 MiB`、blur target `64 MiB`、clip framebuffer `512 MiB`；Skija CPU 侧另有 layout `512` 项、raster `64 MiB`、字体环境最多 `4` 个且只淘汰无 active lease 的环境。texture、NanoVG external image、framebuffer 和 native font environment 均有显式 delete/close；framebuffer/blur 为避免 resize 后重复创建会保留历史峰值，但受硬上限约束，本轮未发现正常路径无界增长；
+- 审计发现 text/image cache 替换活动 raster 集时存在失败事务缺口：旧纹理可能已被容量驱逐，而新集合在中途 upload 失败后仍保留旧 `activeRasters` identity；再次激活同一个旧 List 会错误短路，随后 resolve 报告活动纹理缺失。两类 cache 现在在失败时共同清空 active identity/key，回收本轮已创建纹理，并把 cleanup 异常作为 suppressed 保留；捕获范围覆盖 `RuntimeException | Error`，因此后续重试会真实重建旧集合；
+- image/text `resolve` 不再执行每次 `glIsTexture`；cache 自身是 texture owner，创建和删除路径已完整记账，逐 draw 同步驱动查询只会引入 stall，不能增加跨上下文正确性。图片采样状态继续由 renderer 的 `NanoVgTextureSampling` 在实际 draw 前集中管理，不再在 cache resolve 中重复改 texture parameter；
+- `OpenGlTextTextureCacheTest` 与 `OpenGlImageTextureCacheTest` 新增失败注入：先激活旧集合，再让替代集合的第二次创建失败，确认旧 GPU texture 已被驱逐，随后关闭注入并用相同旧 List 成功重建。两个完整测试类修复后字面 `BUILD SUCCESSFUL in 22s`；本节不以单元测试替代长期显存与 RenderDoc 实机验证。
+
+### 2026-08-25 00:18：OpenGL DisplayList preparation 零分配 direct-paint 路径
+
+- 新增独立 Gradle 任务 `:fandui-render-opengl:renderPreparationPerformanceProbe`，仅位于 test source set，不进入发布 JAR，也不挂默认 `check`。固定 Java 17、G1、`512 MiB` heap 和 `-Xbatch`，以 `ThreadMXBean` 统计当前线程精确分配；无 OpenGL context 的 fixture 覆盖共享纯色、每命令不同纯色、共享 NanoVG 原生两色线性渐变，各自使用 `100/1000` 条 draw command、5 组样本取中位数；
+- 优化前基线为 `artifacts/fandui-render-preparation-before-direct-paint-20260825.csv`，`541` bytes / SHA-256 `54FFEF05519CAE5BB1B8FC3ACAF5AF0FCC52F276434F508F56C0CE82105B7945`。最终样本为 `artifacts/fandui-render-preparation-after-direct-paint-final-20260825.csv`，`522` / `D09A71B35EDB346A666FEA9596F0F407FD85548A8AF945F579D90EC98E4E06D3`；独立 JVM 复测为 `artifacts/fandui-render-preparation-after-direct-paint-repeat-20260825.csv`，`522` / `FB74E6FCE2598913EB1E2799C39647A7F95E43344972446D5D01CCBB38D35111`；
+- 1000 命令最终对比：共享纯色 `6111.4 -> 1667.733 ns`（`-72.71%`）、不同纯色 `85651.2 -> 1863.0 ns`（`-97.82%`）、原生两色渐变 `6815.733 -> 5901.333 ns`（`-13.42%`）；对应每次准备分配分别从 `792/53120/808 B` 全部降为 `0 B`。独立复测得到 `1599.267/1837.467/5789.0 ns` 且仍全部 `0 B`，方向和量级一致；
+- `PreparedFrame` 不再为纯色和 NanoVG 可直接表达的两端渐变创建 `PreparedPaint`、identity-map entry 与 retained array；回放直接读取 immutable `DisplayPaint`。只有必须用 lookup texture 的多段渐变才惰性创建 identity map，以保留同一 paint 的 GPU image 去重；图片/文字改按 immutable DisplayList 的确定命令顺序存入可增长数组，删除 command identity map 和第二份 retained texture array，并在正常回放末尾验证槽位全部消费；
+- preparation 与 player 主命令循环改为索引读取 RandomAccess command list，去掉每次 `32 B` iterator。新增 `NanoVgPreparedFrameTest` 锁定 solid/native-linear/native-radial 共用空准备帧，以及 `9` 个透明图片命令跨容量扩展、夹杂非纹理命令时仍保留准确 replay slot；OpenGL 模块全量结果为 `14 suites / 59 tests / 0 failures / 0 errors / 0 skipped`，字面 `BUILD SUCCESSFUL in 23s`；
+- 该数字只描述 DisplayList 或资源 identity 变化时的 renderer CPU preparation；稳定 DisplayList 本就复用既有 `PreparedFrame`，而 GPU tessellation、draw call、texture upload 和 swap 不在此 probe 内。本轮没有改变公共 API、Canvas 命令语义、复杂渐变 cache key、premultiplied alpha 或三版本宿主接入，也尚未用这批新字节码重启 Minecraft。
+
+### 2026-08-25 00:47：预设图标目录扩充与 F9 独立 Gallery
+
+- `Icons` 从原有 19 个具名常量扩充到 `58` 个，新增账户、文件、编辑、可见性、状态、窗口、媒体和导航等常用图标；全部定义为 24x24 view-box 下的不可变 FandUI `Path`/stroke/fill，类初始化后不解析 SVG、不创建 texture，也不依赖 Minecraft、Fabric、LWJGL、NanoVG 或 Skija 类型；
+- 新增 `Icons.all()`，返回单一、声明顺序稳定且不可修改的 `Map<String, IconDefinition>`，兼容别名也显式保留。目录在常量声明时通过私有 `preset(...)` 注册，避免维护第二份手写清单；反射回归要求每个 public static `IconDefinition` 字段都与目录一一对应，防止以后新增图标却漏入选择器或文档；
+- 三版本共享的 `FandUiTestScreen` 主页面新增“浏览全部图标 · Icon gallery”按钮。独立 Gallery 直接消费 `Icons.all()`，逐行显示 30px 矢量预览、常量名和 layer 数，并提供外层滚轮/拖动滚动与显式返回按钮；Screen 替换使用现有 `runtime.screens().open(...)`，没有为开发 fixture 扩张公共导航栈；
+- 为保持紧凑视口可靠，当前 Gallery 使用单列目录而未预先引入通用 Grid/Wrap 组件；`360x240` 与 `960x720` 布局、全部 58 项可达、滚动范围、入口/返回各一次回调和只读快照均有 Core 回归。API/Core 定向命令字面 `BUILD SUCCESSFUL in 15s`；
+- API/Core 全量测试与三个 Fabric bridge 的 `compileJava --rerun-tasks` 字面 `BUILD SUCCESSFUL in 35s`、`14 actionable tasks: 14 executed`。随后 `./gradlew.bat check --rerun-tasks --no-build-cache --console=plain --max-workers=2 --no-daemon` 字面 `BUILD SUCCESSFUL in 3m 46s`、`41 actionable tasks: 41 executed`；XML 汇总为 `46 suites / 225 tests / 0 failures / 0 errors / 0 skipped`，Javadoc、japicmp 和三版本发布 JAR 内 `246` 个公共 API class 一致性均通过；
+- 1.21.4 使用新字节码重新启动，Minecraft PID `19940`；综合测试 Screen 自动打开，日志确认 `854x480 / 46 batches / 59 draw calls / FBO 3`、资源 generation `1`，OpenAL 使用 `No Output` 避免宿主音频设备丢失时重复刷日志。客户端保留运行供人工检查入口、全部图标、滚动与返回；本轮未执行 Git commit、branch、push、reset 或 baseline 更新。

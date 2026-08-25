@@ -7,6 +7,7 @@ import cn.fandmc.fandui.api.text.TextPosition;
 import cn.fandmc.fandui.api.text.TextRange;
 import cn.fandmc.fandui.api.text.TextRequest;
 import cn.fandmc.fandui.api.text.TextService;
+import cn.fandmc.fandui.core.resource.FontResourceSnapshot;
 
 import java.util.HashMap;
 import java.util.List;
@@ -22,13 +23,14 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /** Skija-backed asynchronous text layout and CPU raster service. */
 public final class SkijaTextService implements TextService, AutoCloseable {
     private static final int MAX_PENDING_JOBS = 256;
 
     private final Object lifecycleLock = new Object();
-    private final LongSupplier resourceGeneration;
+    private final Supplier<FontResourceSnapshot> fontResources;
     private final AtomicReference<Thread> workerThread = new AtomicReference<>();
     private final ThreadPoolExecutor executor;
     private final SkijaTextEngine engine;
@@ -40,7 +42,14 @@ public final class SkijaTextService implements TextService, AutoCloseable {
 
     public SkijaTextService(LongSupplier resourceGeneration) {
         this(
-                resourceGeneration,
+                generationSnapshot(resourceGeneration),
+                SkijaTextEngine.DEFAULT_LAYOUT_CACHE_ENTRIES,
+                SkijaTextEngine.DEFAULT_RASTER_CACHE_BYTES);
+    }
+
+    public SkijaTextService(Supplier<FontResourceSnapshot> fontResources) {
+        this(
+                fontResources,
                 SkijaTextEngine.DEFAULT_LAYOUT_CACHE_ENTRIES,
                 SkijaTextEngine.DEFAULT_RASTER_CACHE_BYTES);
     }
@@ -49,7 +58,14 @@ public final class SkijaTextService implements TextService, AutoCloseable {
             LongSupplier resourceGeneration,
             int layoutCacheEntries,
             long rasterCacheBytes) {
-        this.resourceGeneration = Objects.requireNonNull(resourceGeneration, "resourceGeneration");
+        this(generationSnapshot(resourceGeneration), layoutCacheEntries, rasterCacheBytes);
+    }
+
+    SkijaTextService(
+            Supplier<FontResourceSnapshot> fontResources,
+            int layoutCacheEntries,
+            long rasterCacheBytes) {
+        this.fontResources = Objects.requireNonNull(fontResources, "fontResources");
         ThreadFactory threadFactory = task -> {
             Thread thread = new Thread(task, "FandUI Text Worker");
             thread.setDaemon(true);
@@ -82,18 +98,14 @@ public final class SkijaTextService implements TextService, AutoCloseable {
     @Override
     public CompletableFuture<TextLayout> layout(TextRequest request) {
         Objects.requireNonNull(request, "request");
-        long generation;
+        FontResourceSnapshot resources;
         try {
-            generation = resourceGeneration.getAsLong();
+            resources = Objects.requireNonNull(fontResources.get(), "fontResources.get()");
         } catch (RuntimeException | Error exception) {
             return CompletableFuture.failedFuture(exception);
         }
-        if (generation < 0L) {
-            return CompletableFuture.failedFuture(
-                    new IllegalStateException("Resource generation must not be negative"));
-        }
 
-        TextCacheKey key = TextCacheKey.from(request, generation);
+        TextCacheKey key = TextCacheKey.from(request, resources);
         CompletableFuture<LayoutMetrics> shared;
         synchronized (lifecycleLock) {
             if (closed) {
@@ -103,11 +115,11 @@ public final class SkijaTextService implements TextService, AutoCloseable {
             if (shared == null) {
                 shared = new CompletableFuture<>();
                 layoutJobs.put(key, shared);
-                scheduleLayout(key, request, shared);
+                scheduleLayout(key, request, resources, shared);
             }
         }
         CompletableFuture<LayoutMetrics> source = shared;
-        return source.thenApply(metrics -> new SkijaTextLayout(this, request, key, metrics));
+        return source.thenApply(metrics -> new SkijaTextLayout(this, request, key, metrics, resources));
     }
 
     @Override
@@ -197,15 +209,39 @@ public final class SkijaTextService implements TextService, AutoCloseable {
         return result;
     }
 
+    /** Validates and prepares a candidate custom-font generation on the Skija owner thread. */
+    public void validateFonts(FontResourceSnapshot resources) {
+        Objects.requireNonNull(resources, "resources");
+        try {
+            schedule(() -> {
+                engine.validateFonts(resources);
+                return null;
+            }).join();
+        } catch (java.util.concurrent.CompletionException exception) {
+            Throwable cause = exception.getCause();
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw exception;
+        }
+    }
+
     private void scheduleLayout(
             TextCacheKey key,
             TextRequest request,
+            FontResourceSnapshot resources,
             CompletableFuture<LayoutMetrics> result) {
         if (!reserveJob(result)) {
             layoutJobs.remove(key, result);
             return;
         }
-        executeReserved(result, () -> engine.layout(key, request), () -> layoutJobs.remove(key, result));
+        executeReserved(
+                result,
+                () -> engine.layout(key, request, resources),
+                () -> layoutJobs.remove(key, result));
     }
 
     private void scheduleRaster(
@@ -292,6 +328,11 @@ public final class SkijaTextService implements TextService, AutoCloseable {
             return stateException;
         }
         return new IllegalStateException("Failed to start the FandUI text worker", cause);
+    }
+
+    private static Supplier<FontResourceSnapshot> generationSnapshot(LongSupplier generation) {
+        LongSupplier checked = Objects.requireNonNull(generation, "resourceGeneration");
+        return () -> FontResourceSnapshot.empty(checked.getAsLong());
     }
 
     private static <T> CompletableFuture<T> closedFuture() {

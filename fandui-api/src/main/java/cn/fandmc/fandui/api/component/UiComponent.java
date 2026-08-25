@@ -33,7 +33,8 @@ import java.util.Optional;
 public abstract class UiComponent {
     private final @Nullable UiKey key;
     private final ListenerBucket listeners = new ListenerBucket();
-    private @Nullable UiContainer parent;
+    /** Published with the same structural lock used by {@link UiContainer}. */
+    private volatile @Nullable UiContainer parent;
     private StyleResolver style = StyleResolver.fixed(Style.defaults());
     private boolean visible = true;
     private boolean enabled = true;
@@ -64,7 +65,7 @@ public abstract class UiComponent {
     }
 
     public final void setStyle(StyleResolver style) {
-        ComponentBindings.assertMutationAllowed(this);
+        requireMutationThread();
         StyleResolver checked = Objects.requireNonNull(style, "style");
         if (this.style != checked) {
             this.style = checked;
@@ -77,10 +78,11 @@ public abstract class UiComponent {
     }
 
     public final void setVisible(boolean visible) {
-        ComponentBindings.assertMutationAllowed(this);
+        requireMutationThread();
         if (this.visible != visible) {
             this.visible = visible;
             invalidateLayout();
+            interactionChanged();
         }
     }
 
@@ -89,10 +91,11 @@ public abstract class UiComponent {
     }
 
     public final void setEnabled(boolean enabled) {
-        ComponentBindings.assertMutationAllowed(this);
+        requireMutationThread();
         if (this.enabled != enabled) {
             this.enabled = enabled;
             invalidatePaint();
+            interactionChanged();
         }
     }
 
@@ -101,10 +104,11 @@ public abstract class UiComponent {
     }
 
     public final void setFocusable(boolean focusable) {
-        ComponentBindings.assertMutationAllowed(this);
+        requireMutationThread();
         if (this.focusable != focusable) {
             this.focusable = focusable;
             invalidatePaint();
+            interactionChanged();
         }
     }
 
@@ -113,7 +117,7 @@ public abstract class UiComponent {
     }
 
     public final void setTabIndex(int tabIndex) {
-        ComponentBindings.assertMutationAllowed(this);
+        requireMutationThread();
         if (this.tabIndex != tabIndex) {
             this.tabIndex = tabIndex;
             invalidatePaint();
@@ -125,7 +129,7 @@ public abstract class UiComponent {
     }
 
     public final void setHitTestBehavior(HitTestBehavior value) {
-        ComponentBindings.assertMutationAllowed(this);
+        requireMutationThread();
         HitTestBehavior checked = Objects.requireNonNull(value, "value");
         if (hitTestBehavior != checked) {
             hitTestBehavior = checked;
@@ -138,11 +142,12 @@ public abstract class UiComponent {
     }
 
     public final void setCursor(CursorShape value) {
-        ComponentBindings.assertMutationAllowed(this);
+        requireMutationThread();
         CursorShape checked = Objects.requireNonNull(value, "value");
         if (cursor != checked) {
             cursor = checked;
             invalidatePaint();
+            interactionChanged();
         }
     }
 
@@ -150,8 +155,16 @@ public abstract class UiComponent {
             Class<E> type,
             EventRoute route,
             EventHandler<E> handler) {
-        ComponentBindings.assertMutationAllowed(this);
+        requireMutationThread();
         return listeners.register(type, route, handler);
+    }
+
+    /**
+     * Verifies that a custom component mutation may run on the current thread.
+     * Call this before changing component-owned state in public mutation methods.
+     */
+    protected final void requireMutationThread() {
+        ComponentBindings.assertMutationAllowed(this);
     }
 
     /** Measures this component for the supplied constraints and callback-scoped environment. */
@@ -175,6 +188,10 @@ public abstract class UiComponent {
 
     protected final void invalidatePaint() {
         ComponentBindings.invalidatePaint(this);
+    }
+
+    private void interactionChanged() {
+        ComponentBindings.interactionChanged(this);
     }
 
     final void assignParent(@Nullable UiContainer parent) {

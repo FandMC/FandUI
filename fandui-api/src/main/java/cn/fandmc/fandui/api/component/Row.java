@@ -51,6 +51,7 @@ public final class Row extends UiContainer {
     }
 
     public void setGap(float gap) {
+        requireMutationThread();
         float checked = Preconditions.nonNegative(gap, "gap");
         if (Float.compare(this.gap, checked) != 0) {
             this.gap = checked;
@@ -63,6 +64,7 @@ public final class Row extends UiContainer {
     }
 
     public void setMainAxisAlignment(MainAxisAlignment alignment) {
+        requireMutationThread();
         MainAxisAlignment checked = Objects.requireNonNull(alignment, "alignment");
         if (mainAxisAlignment != checked) {
             mainAxisAlignment = checked;
@@ -75,6 +77,7 @@ public final class Row extends UiContainer {
     }
 
     public void setCrossAxisAlignment(CrossAxisAlignment alignment) {
+        requireMutationThread();
         CrossAxisAlignment checked = Objects.requireNonNull(alignment, "alignment");
         if (crossAxisAlignment != checked) {
             crossAxisAlignment = checked;

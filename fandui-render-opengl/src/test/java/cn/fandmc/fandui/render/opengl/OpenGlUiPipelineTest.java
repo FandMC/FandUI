@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -141,6 +142,63 @@ class OpenGlUiPipelineTest {
     }
 
     @Test
+    void keepsPendingTextWhileAnimationPublishesTheLatestDisplayList() {
+        RecordingDrawer drawer = new RecordingDrawer();
+        ControllableTextRasterizer rasterizer = new ControllableTextRasterizer();
+        StubTextLayout layout = new StubTextLayout("animated pending", 1L);
+        OpenGlUiPipeline pipeline = pipeline(
+                drawer,
+                new RecordingImageStore(),
+                new RecordingTextStore(),
+                image -> null,
+                () -> 1L,
+                rasterizer);
+        DisplayList first = textDisplayListAt(0.0f, layout);
+        DisplayList latest = textDisplayListAt(24.0f, layout);
+
+        assertTrue(pipeline.render(VIEWPORT, List.of(frame(first, VIEWPORT))).isEmpty());
+        CompletableFuture<TextRaster> pending = rasterizer.future(layout);
+        assertTrue(pipeline.render(VIEWPORT, List.of(frame(latest, VIEWPORT))).isEmpty());
+        assertSame(pending, rasterizer.future(layout));
+        assertFalse(pending.isCancelled());
+        assertEquals(1, rasterizer.requests);
+
+        rasterizer.complete(layout, raster(layout, 41L, TextPixelFormat.ALPHA_8));
+        assertTrue(pipeline.render(VIEWPORT, List.of(frame(latest, VIEWPORT))).isPresent());
+        assertSame(latest, drawer.lastDisplayList());
+        pipeline.close();
+    }
+
+    @Test
+    void reusesReadyTextResourcesAcrossDisplayListOnlyAnimationFrames() {
+        RecordingDrawer drawer = new RecordingDrawer();
+        RecordingTextStore textStore = new RecordingTextStore();
+        AtomicInteger rasterRequests = new AtomicInteger();
+        StubTextLayout layout = new StubTextLayout("animated ready", 1L);
+        OpenGlUiPipeline pipeline = pipeline(
+                drawer,
+                new RecordingImageStore(),
+                textStore,
+                image -> null,
+                () -> 1L,
+                (requested, scale) -> {
+                    rasterRequests.incrementAndGet();
+                    return CompletableFuture.completedFuture(
+                            raster(requested, 42L, TextPixelFormat.ALPHA_8));
+                });
+        DisplayList first = textDisplayListAt(0.0f, layout);
+        DisplayList next = textDisplayListAt(12.0f, layout);
+
+        assertTrue(pipeline.render(VIEWPORT, List.of(frame(first, VIEWPORT))).isPresent());
+        assertTrue(pipeline.render(VIEWPORT, List.of(frame(next, VIEWPORT))).isPresent());
+        assertSame(next, drawer.lastDisplayList());
+        assertSame(drawer.resources.get(0), drawer.resources.get(1));
+        assertEquals(1, rasterRequests.get());
+        assertEquals(1, textStore.activations);
+        pipeline.close();
+    }
+
+    @Test
     void framebufferResizeReusesReadyTextAndGuiScaleRerasterizesIt() {
         RecordingDrawer drawer = new RecordingDrawer();
         RecordingTextStore textStore = new RecordingTextStore();
@@ -241,11 +299,6 @@ class OpenGlUiPipelineTest {
 
                     @Override
                     public void delete(int textureId) {
-                    }
-
-                    @Override
-                    public boolean isLive(int textureId) {
-                        return false;
                     }
                 },
                 64L);
@@ -419,6 +472,15 @@ class OpenGlUiPipelineTest {
             public Optional<OpenGlTarget> currentTarget() {
                 return Optional.empty();
             }
+
+            @Override
+            public boolean supportsStateHandoff() {
+                return true;
+            }
+
+            @Override
+            public void restoreStateAfterFandUi() {
+            }
         };
     }
 
@@ -431,9 +493,13 @@ class OpenGlUiPipelineTest {
     }
 
     private static DisplayList textDisplayList(TextLayout... layouts) {
+        return textDisplayListAt(0.0f, layouts);
+    }
+
+    private static DisplayList textDisplayListAt(float x, TextLayout... layouts) {
         RecordingCanvas2D canvas = RecordingCanvas2D.begin();
         for (int index = 0; index < layouts.length; index++) {
-            canvas.drawText(layouts[index], new Point(index * 10.0f, 5.0f));
+            canvas.drawText(layouts[index], new Point(x + index * 10.0f, 5.0f));
         }
         return canvas.finish();
     }
@@ -504,9 +570,11 @@ class OpenGlUiPipelineTest {
 
     private static final class ControllableTextRasterizer implements TextRasterizer {
         private final IdentityHashMap<TextLayout, CompletableFuture<TextRaster>> futures = new IdentityHashMap<>();
+        private int requests;
 
         @Override
         public CompletableFuture<TextRaster> raster(TextLayout layout, float deviceScale) {
+            requests++;
             return futures.computeIfAbsent(layout, ignored -> new CompletableFuture<>());
         }
 

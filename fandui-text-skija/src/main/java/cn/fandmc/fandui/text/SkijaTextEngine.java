@@ -1,5 +1,6 @@
 package cn.fandmc.fandui.text;
 
+import cn.fandmc.fandui.api.UiKey;
 import cn.fandmc.fandui.api.layout.Size;
 import cn.fandmc.fandui.api.layout.Point;
 import cn.fandmc.fandui.api.layout.Rect;
@@ -17,6 +18,7 @@ import cn.fandmc.fandui.api.text.TextRange;
 import cn.fandmc.fandui.api.text.TextRangeGeometry;
 import cn.fandmc.fandui.api.text.TextRequest;
 import cn.fandmc.fandui.api.text.TextWrap;
+import cn.fandmc.fandui.core.resource.FontResourceSnapshot;
 import io.github.humbleui.skija.ColorAlphaType;
 import io.github.humbleui.skija.ColorType;
 import io.github.humbleui.skija.Data;
@@ -55,6 +57,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 final class SkijaTextEngine implements AutoCloseable {
     static final int DEFAULT_LAYOUT_CACHE_ENTRIES = 512;
@@ -63,6 +67,7 @@ final class SkijaTextEngine implements AutoCloseable {
     private static final float MAX_UNBOUNDED_LAYOUT_WIDTH = 1_048_576.0f;
     private static final long MAX_RASTER_SURFACE_BYTES = 64L * 1024L * 1024L;
     private static final int PIXEL_PADDING = 1;
+    private static final int MAX_FONT_ENVIRONMENTS = 4;
 
     private final Thread ownerThread = Thread.currentThread();
     private final int layoutCacheLimit;
@@ -70,8 +75,10 @@ final class SkijaTextEngine implements AutoCloseable {
     private final FontMgr fontManager;
     private final Typeface sansTypeface;
     private final Typeface emojiTypeface;
-    private final TypefaceFontProvider fontProvider;
-    private final FontCollection fontCollection;
+    /** Serializes environment lookup, lease acquisition, LRU retirement, and cache inspection. */
+    private final Object fontEnvironmentLock = new Object();
+    private final LinkedHashMap<String, FontEnvironment> fontEnvironments =
+            new LinkedHashMap<>(4, 0.75f, true);
     private final LinkedHashMap<TextCacheKey, LayoutMetrics> layoutCache =
             new LinkedHashMap<>(32, 0.75f, true);
     private final LinkedHashMap<RasterCacheKey, TextRaster> rasterCache =
@@ -93,8 +100,6 @@ final class SkijaTextEngine implements AutoCloseable {
         FontMgr createdFontManager = null;
         Typeface createdSans = null;
         Typeface createdEmoji = null;
-        TypefaceFontProvider createdProvider = null;
-        FontCollection createdCollection = null;
         try {
             createdFontManager = FontMgr.getDefault();
             createdSans = loadTypeface(
@@ -111,18 +116,7 @@ final class SkijaTextEngine implements AutoCloseable {
             requireGlyph(createdSans, 0x4E2D, BundledFontCatalog.SANS_ALIAS);
             requireGlyph(createdEmoji, 0x1F600, BundledFontCatalog.EMOJI_ALIAS);
 
-            createdProvider = new TypefaceFontProvider();
-            createdProvider.registerTypeface(createdSans, BundledFontCatalog.SANS_ALIAS);
-            createdProvider.registerTypeface(createdEmoji, BundledFontCatalog.EMOJI_ALIAS);
-
-            createdCollection = new FontCollection();
-            createdCollection
-                    .setAssetFontManager(createdProvider)
-                    .setDefaultFontManager(createdProvider, BundledFontCatalog.SANS_ALIAS)
-                    .setEnableFallback(true);
         } catch (RuntimeException | Error exception) {
-            closeQuietly(createdCollection);
-            closeQuietly(createdProvider);
             closeQuietly(createdEmoji);
             closeQuietly(createdSans);
             closeQuietly(createdFontManager);
@@ -131,21 +125,34 @@ final class SkijaTextEngine implements AutoCloseable {
         fontManager = createdFontManager;
         sansTypeface = createdSans;
         emojiTypeface = createdEmoji;
-        fontProvider = createdProvider;
-        fontCollection = createdCollection;
+        try {
+            FontResourceSnapshot empty = FontResourceSnapshot.empty(0L);
+            fontEnvironments.put(
+                    empty.contentFingerprint(),
+                    FontEnvironment.create(fontManager, sansTypeface, emojiTypeface, empty.copyFonts()));
+        } catch (RuntimeException | Error exception) {
+            closeQuietly(emojiTypeface);
+            closeQuietly(sansTypeface);
+            closeQuietly(fontManager);
+            throw new IllegalStateException("Failed to initialize bundled Skija font environment", exception);
+        }
     }
 
-    LayoutMetrics layout(TextCacheKey key, TextRequest request) {
+    LayoutMetrics layout(
+            TextCacheKey key,
+            TextRequest request,
+            FontResourceSnapshot resources) {
         assertUsable();
         LayoutMetrics cached = layoutCache.get(key);
         if (cached != null) {
             return cached;
         }
 
-        LayoutMetrics metrics;
-        try (Paragraph paragraph = buildAndLayout(request)) {
-            metrics = extractMetrics(request, paragraph);
-        }
+        LayoutMetrics metrics = withEnvironment(resources, environment -> {
+            try (Paragraph paragraph = buildAndLayout(request, environment)) {
+                return extractMetrics(request, paragraph);
+            }
+        });
         layoutCache.put(key, metrics);
         trimLayoutCache();
         return metrics;
@@ -175,20 +182,22 @@ final class SkijaTextEngine implements AutoCloseable {
         assertUsable();
         Objects.requireNonNull(layout, "layout");
         Objects.requireNonNull(position, "position");
-        try (Paragraph paragraph = buildExistingLayout(layout)) {
-            PositionWithAffinity result = paragraph.getGlyphPositionAtCoordinate(
-                    position.x() + layout.metrics().paintLeft(),
-                    position.y());
-            int offset = checkedUtf16Index(
-                    result.getPosition(),
-                    layout.request().text(),
-                    "hit-test position");
-            TextAffinity affinity = switch (result.getAffinity()) {
-                case UPSTREAM -> TextAffinity.UPSTREAM;
-                case DOWNSTREAM -> TextAffinity.DOWNSTREAM;
-            };
-            return new TextPosition(offset, affinity);
-        }
+        return withEnvironment(layout.fontResources(), environment -> {
+            try (Paragraph paragraph = buildExistingLayout(layout, environment)) {
+                PositionWithAffinity result = paragraph.getGlyphPositionAtCoordinate(
+                        position.x() + layout.metrics().paintLeft(),
+                        position.y());
+                int offset = checkedUtf16Index(
+                        result.getPosition(),
+                        layout.request().text(),
+                        "hit-test position");
+                TextAffinity affinity = switch (result.getAffinity()) {
+                    case UPSTREAM -> TextAffinity.UPSTREAM;
+                    case DOWNSTREAM -> TextAffinity.DOWNSTREAM;
+                };
+                return new TextPosition(offset, affinity);
+            }
+        });
     }
 
     TextGeometry geometry(
@@ -206,21 +215,40 @@ final class SkijaTextEngine implements AutoCloseable {
             checkedUtf16Index(range.endUtf16(), text, "range end");
         }
 
-        try (Paragraph paragraph = buildExistingLayout(layout)) {
-            Rect caretBounds = caretBounds(paragraph, layout.metrics(), text, caret);
-            List<TextRangeGeometry> resultRanges = new ArrayList<>(checkedRanges.size());
-            for (TextRange range : checkedRanges) {
-                resultRanges.add(new TextRangeGeometry(
-                        range,
-                        rangeBounds(paragraph, layout.metrics(), range)));
+        return withEnvironment(layout.fontResources(), environment -> {
+            try (Paragraph paragraph = buildExistingLayout(layout, environment)) {
+                Rect caretBounds = caretBounds(paragraph, layout.metrics(), text, caret);
+                List<TextRangeGeometry> resultRanges = new ArrayList<>(checkedRanges.size());
+                for (TextRange range : checkedRanges) {
+                    resultRanges.add(new TextRangeGeometry(
+                            range,
+                            rangeBounds(paragraph, layout.metrics(), range)));
+                }
+                return new TextGeometry(caretBounds, resultRanges);
             }
-            return new TextGeometry(caretBounds, resultRanges);
-        }
+        });
     }
 
     CacheStats cacheStats() {
         assertUsable();
-        return new CacheStats(layoutCache.size(), rasterCache.size(), rasterCacheBytes);
+        synchronized (fontEnvironmentLock) {
+            int customTypefaces = fontEnvironments.values().stream()
+                    .mapToInt(environment -> environment.customTypefaces.size())
+                    .sum();
+            return new CacheStats(
+                    layoutCache.size(),
+                    rasterCache.size(),
+                    rasterCacheBytes,
+                    fontEnvironments.size(),
+                    customTypefaces);
+        }
+    }
+
+    void validateFonts(FontResourceSnapshot resources) {
+        assertUsable();
+        withEnvironment(
+                Objects.requireNonNull(resources, "resources"),
+                environment -> null);
     }
 
     private LayoutMetrics extractMetrics(TextRequest request, Paragraph paragraph) {
@@ -264,12 +292,13 @@ final class SkijaTextEngine implements AutoCloseable {
                 paintLeft);
     }
 
-    private Paragraph buildAndLayout(TextRequest request) {
+    private Paragraph buildAndLayout(TextRequest request, FontEnvironment environment) {
         boolean unconstrained = request.wrap() == TextWrap.NONE || !Float.isFinite(request.maxWidth());
         Alignment requestedAlignment = alignment(request.alignment());
         Paragraph paragraph = buildParagraph(
                 request,
-                unconstrained ? Alignment.START : requestedAlignment);
+                unconstrained ? Alignment.START : requestedAlignment,
+                environment);
         try {
             if (!unconstrained) {
                 paragraph.layout(request.maxWidth());
@@ -297,10 +326,11 @@ final class SkijaTextEngine implements AutoCloseable {
         }
     }
 
-    private Paragraph buildExistingLayout(SkijaTextLayout layout) {
+    private Paragraph buildExistingLayout(SkijaTextLayout layout, FontEnvironment environment) {
         Paragraph paragraph = buildParagraph(
                 layout.request(),
-                alignment(layout.request().alignment()));
+                alignment(layout.request().alignment()),
+                environment);
         try {
             paragraph.layout(layout.metrics().paragraphWidth());
             return paragraph;
@@ -418,14 +448,18 @@ final class SkijaTextEngine implements AutoCloseable {
         return List.copyOf(bounds);
     }
 
-    private Paragraph buildParagraph(TextRequest request, Alignment paragraphAlignment) {
-        return buildParagraph(request, paragraphAlignment, request.style().color());
+    private Paragraph buildParagraph(
+            TextRequest request,
+            Alignment paragraphAlignment,
+            FontEnvironment environment) {
+        return buildParagraph(request, paragraphAlignment, request.style().color(), environment);
     }
 
     private Paragraph buildParagraph(
             TextRequest request,
             Alignment paragraphAlignment,
-            Color paintColor) {
+            Color paintColor,
+            FontEnvironment environment) {
         var requestStyle = request.style();
         try (io.github.humbleui.skija.paragraph.TextStyle textStyle =
                      new io.github.humbleui.skija.paragraph.TextStyle();
@@ -454,7 +488,7 @@ final class SkijaTextEngine implements AutoCloseable {
                 paragraphStyle.setEllipsis("\u2026");
             }
 
-            try (ParagraphBuilder builder = new ParagraphBuilder(paragraphStyle, fontCollection)) {
+            try (ParagraphBuilder builder = new ParagraphBuilder(paragraphStyle, environment.collection)) {
                 builder.pushStyle(textStyle);
                 builder.addText(request.text());
                 builder.popStyle();
@@ -464,6 +498,14 @@ final class SkijaTextEngine implements AutoCloseable {
     }
 
     private TextRaster rasterize(SkijaTextLayout layout, int scaleUnits) {
+        return withEnvironment(layout.fontResources(), environment ->
+                rasterize(layout, scaleUnits, environment));
+    }
+
+    private TextRaster rasterize(
+            SkijaTextLayout layout,
+            int scaleUnits,
+            FontEnvironment environment) {
         float scale = TextRaster.scaleFromUnits(scaleUnits);
         LayoutMetrics metrics = layout.metrics();
         if (metrics.size().width() == 0.0f || metrics.size().height() == 0.0f) {
@@ -494,7 +536,7 @@ final class SkijaTextEngine implements AutoCloseable {
                 ColorAlphaType.PREMUL);
         Color requestedColor = layout.request().style().color();
         Color maskColor = new Color(1.0f, 1.0f, 1.0f, requestedColor.alpha());
-        byte[] rgba = rasterizeRgba(layout, metrics, scale, imageInfo, maskColor);
+        byte[] rgba = rasterizeRgba(layout, metrics, scale, imageInfo, maskColor, environment);
         if (isMonochrome(rgba, maskColor)) {
             byte[] alpha = new byte[Math.multiplyExact(width, height)];
             for (int pixel = 0; pixel < alpha.length; pixel++) {
@@ -513,7 +555,7 @@ final class SkijaTextEngine implements AutoCloseable {
         }
 
         if (!requestedColor.equals(maskColor)) {
-            rgba = rasterizeRgba(layout, metrics, scale, imageInfo, requestedColor);
+            rgba = rasterizeRgba(layout, metrics, scale, imageInfo, requestedColor, environment);
         }
         return createRaster(
                 layout,
@@ -532,13 +574,15 @@ final class SkijaTextEngine implements AutoCloseable {
             LayoutMetrics metrics,
             float scale,
             ImageInfo imageInfo,
-            Color paintColor) {
+            Color paintColor,
+            FontEnvironment environment) {
         int width = imageInfo.getWidth();
         int height = imageInfo.getHeight();
         try (Paragraph paragraph = buildParagraph(
                      layout.request(),
                      alignment(layout.request().alignment()),
-                     paintColor);
+                     paintColor,
+                     environment);
              Surface surface = Surface.makeRaster(imageInfo);
              Pixmap pixmap = new Pixmap()) {
             paragraph.layout(metrics.paragraphWidth());
@@ -658,6 +702,110 @@ final class SkijaTextEngine implements AutoCloseable {
         aliases.add(BundledFontCatalog.SANS_ALIAS);
         aliases.add(BundledFontCatalog.EMOJI_ALIAS);
         return aliases.toArray(String[]::new);
+    }
+
+    @SuppressWarnings("try")
+    private <T> T withEnvironment(
+            FontResourceSnapshot resources,
+            EnvironmentWork<T> work) {
+        EnvironmentLease lease = acquireEnvironment(resources);
+        try {
+            return work.run(lease.environment());
+        } finally {
+            try {
+                lease.close();
+            } finally {
+                // A lease can defer an LRU close. Revisit the map after every native operation.
+                trimFontEnvironments();
+            }
+        }
+    }
+
+    /**
+     * Looks up (or creates) an environment and acquires its lease while holding the cache lock.
+     * This closes the race where a future concurrent caller could retire an environment between
+     * lookup and lease acquisition.
+     */
+    private EnvironmentLease acquireEnvironment(FontResourceSnapshot resources) {
+        Objects.requireNonNull(resources, "resources");
+        synchronized (fontEnvironmentLock) {
+            String fingerprint = resources.contentFingerprint();
+            FontEnvironment environment = fontEnvironments.get(fingerprint);
+            if (environment != null && environment.isRetired()) {
+                fontEnvironments.remove(fingerprint);
+                environment = null;
+            }
+
+            if (environment == null) {
+                environment = FontEnvironment.create(
+                        fontManager,
+                        sansTypeface,
+                        emojiTypeface,
+                        resources.copyFonts());
+                fontEnvironments.put(fingerprint, environment);
+            }
+            FontEnvironment.Lease lease = environment.acquire();
+            try {
+                trimFontEnvironmentsLocked();
+                return new EnvironmentLease(environment, lease);
+            } catch (RuntimeException | Error exception) {
+                try {
+                    lease.close();
+                } catch (RuntimeException | Error closeFailure) {
+                    exception.addSuppressed(closeFailure);
+                }
+                throw exception;
+            }
+        }
+    }
+
+    private void trimFontEnvironments() {
+        synchronized (fontEnvironmentLock) {
+            trimFontEnvironmentsLocked();
+        }
+    }
+
+    private void trimFontEnvironmentsLocked() {
+        while (fontEnvironments.size() > MAX_FONT_ENVIRONMENTS) {
+            Map.Entry<String, FontEnvironment> candidate = null;
+            for (Map.Entry<String, FontEnvironment> entry : fontEnvironments.entrySet()) {
+                if (!entry.getValue().isActive()) {
+                    candidate = entry;
+                    break;
+                }
+            }
+            if (candidate == null) {
+                // Every resident environment is leased by an in-flight native operation. Keep
+                // the temporary overage; the next lease release will revisit the LRU.
+                return;
+            }
+            fontEnvironments.remove(candidate.getKey());
+            candidate.getValue().requestClose();
+        }
+    }
+
+    private static final class EnvironmentLease implements AutoCloseable {
+        private final FontEnvironment environment;
+        private final FontEnvironment.Lease lease;
+
+        private EnvironmentLease(FontEnvironment environment, FontEnvironment.Lease lease) {
+            this.environment = environment;
+            this.lease = lease;
+        }
+
+        private FontEnvironment environment() {
+            return environment;
+        }
+
+        @Override
+        public void close() {
+            lease.close();
+        }
+    }
+
+    @FunctionalInterface
+    private interface EnvironmentWork<T> {
+        T run(FontEnvironment environment);
     }
 
     private static Alignment alignment(TextAlignment alignment) {
@@ -818,11 +966,35 @@ final class SkijaTextEngine implements AutoCloseable {
         layoutCache.clear();
         rasterCache.clear();
         rasterCacheBytes = 0L;
-        fontCollection.close();
-        fontProvider.close();
-        emojiTypeface.close();
-        sansTypeface.close();
-        fontManager.close();
+        RuntimeException failure = null;
+        synchronized (fontEnvironmentLock) {
+            for (FontEnvironment environment : fontEnvironments.values()) {
+                try {
+                    environment.close();
+                } catch (RuntimeException exception) {
+                    failure = append(failure, exception);
+                }
+            }
+            fontEnvironments.clear();
+        }
+        try {
+            emojiTypeface.close();
+        } catch (RuntimeException exception) {
+            failure = append(failure, exception);
+        }
+        try {
+            sansTypeface.close();
+        } catch (RuntimeException exception) {
+            failure = append(failure, exception);
+        }
+        try {
+            fontManager.close();
+        } catch (RuntimeException exception) {
+            failure = append(failure, exception);
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     private static void closeQuietly(AutoCloseable closeable) {
@@ -836,7 +1008,176 @@ final class SkijaTextEngine implements AutoCloseable {
         }
     }
 
-    record CacheStats(int layouts, int rasters, long rasterBytes) {
+    private static RuntimeException append(RuntimeException current, RuntimeException additional) {
+        if (current == null) {
+            return additional;
+        }
+        current.addSuppressed(additional);
+        return current;
+    }
+
+    private static final class FontEnvironment implements AutoCloseable {
+        private final TypefaceFontProvider provider;
+        private final FontCollection collection;
+        private final List<Typeface> customTypefaces;
+        private final AtomicInteger activeUsers = new AtomicInteger();
+        private boolean closeRequested;
+        private boolean closed;
+
+        private FontEnvironment(
+                TypefaceFontProvider provider,
+                FontCollection collection,
+                List<Typeface> customTypefaces) {
+            this.provider = provider;
+            this.collection = collection;
+            this.customTypefaces = customTypefaces;
+        }
+
+        private Lease acquire() {
+            synchronized (this) {
+                if (closeRequested || closed) {
+                    throw new IllegalStateException("Font environment has already been retired");
+                }
+                activeUsers.incrementAndGet();
+                return new Lease(this);
+            }
+        }
+
+        private boolean isActive() {
+            return activeUsers.get() != 0;
+        }
+
+        private synchronized boolean isRetired() {
+            return closeRequested || closed;
+        }
+
+        private void requestClose() {
+            boolean closeNow = false;
+            synchronized (this) {
+                closeRequested = true;
+                if (!closed && activeUsers.get() == 0) {
+                    closed = true;
+                    closeNow = true;
+                }
+            }
+            if (closeNow) {
+                closeNative();
+            }
+        }
+
+        private void release() {
+            boolean closeNow = false;
+            synchronized (this) {
+                int remaining = activeUsers.decrementAndGet();
+                if (remaining < 0) {
+                    activeUsers.incrementAndGet();
+                    throw new IllegalStateException("Font environment lease was released twice");
+                }
+                if (!closed && closeRequested && remaining == 0) {
+                    closed = true;
+                    closeNow = true;
+                }
+            }
+            if (closeNow) {
+                closeNative();
+            }
+        }
+
+        private static FontEnvironment create(
+                FontMgr fontManager,
+                Typeface sansTypeface,
+                Typeface emojiTypeface,
+                Map<UiKey, byte[]> customFonts) {
+            TypefaceFontProvider provider = null;
+            FontCollection collection = null;
+            List<Typeface> customTypefaces = new ArrayList<>();
+            try {
+                provider = new TypefaceFontProvider();
+                provider.registerTypeface(sansTypeface, BundledFontCatalog.SANS_ALIAS);
+                provider.registerTypeface(emojiTypeface, BundledFontCatalog.EMOJI_ALIAS);
+                for (Map.Entry<UiKey, byte[]> entry : customFonts.entrySet()) {
+                    Typeface typeface;
+                    try (Data data = Data.makeFromBytes(entry.getValue())) {
+                        typeface = fontManager.makeFromData(data);
+                    }
+                    if (typeface == null || typeface.getGlyphsCount() == 0) {
+                        closeQuietly(typeface);
+                        throw new IllegalArgumentException(
+                                "Custom font was not recognized: " + entry.getKey());
+                    }
+                    customTypefaces.add(typeface);
+                    provider.registerTypeface(typeface, entry.getKey().toString());
+                }
+
+                collection = new FontCollection();
+                collection
+                        .setAssetFontManager(provider)
+                        .setDefaultFontManager(provider, BundledFontCatalog.SANS_ALIAS)
+                        .setEnableFallback(true);
+                return new FontEnvironment(provider, collection, List.copyOf(customTypefaces));
+            } catch (RuntimeException | Error exception) {
+                closeQuietly(collection);
+                closeQuietly(provider);
+                for (int index = customTypefaces.size() - 1; index >= 0; index--) {
+                    closeQuietly(customTypefaces.get(index));
+                }
+                throw exception;
+            }
+        }
+
+        @Override
+        public void close() {
+            requestClose();
+        }
+
+        private void closeNative() {
+            RuntimeException failure = null;
+            try {
+                collection.close();
+            } catch (RuntimeException exception) {
+                failure = exception;
+            }
+            try {
+                provider.close();
+            } catch (RuntimeException exception) {
+                failure = append(failure, exception);
+            }
+            for (int index = customTypefaces.size() - 1; index >= 0; index--) {
+                try {
+                    customTypefaces.get(index).close();
+                } catch (RuntimeException exception) {
+                    failure = append(failure, exception);
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        }
+
+        private static final class Lease implements AutoCloseable {
+            private final FontEnvironment owner;
+            private final AtomicBoolean closed = new AtomicBoolean();
+
+            private Lease(FontEnvironment owner) {
+                this.owner = owner;
+            }
+
+            @Override
+            public void close() {
+                if (!closed.compareAndSet(false, true)) {
+                    return;
+                }
+                owner.release();
+            }
+        }
+    }
+
+    record CacheStats(
+            int layouts,
+            int rasters,
+            long rasterBytes,
+            int fontEnvironments,
+            int customTypefaces) {
     }
 
     private record RasterCacheKey(TextCacheKey layout, int scaleUnits) {

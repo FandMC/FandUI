@@ -7,9 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -97,7 +95,7 @@ class OpenGlTextTextureCacheTest {
     }
 
     @Test
-    void resolvesOnlyActiveLiveTexturesWithLinearSampling() {
+    void resolvesOnlyActiveOwnedTexturesWithLinearSampling() {
         FakeTextureDriver driver = new FakeTextureDriver();
         OpenGlTextTextureCache cache = new OpenGlTextTextureCache(driver, 8L);
         TextRaster raster = alphaRaster(4L, 41, Color.rgb(0xFFFFFF));
@@ -108,12 +106,9 @@ class OpenGlTextTextureCacheTest {
         assertThrows(
                 OpenGlRenderException.class,
                 () -> cache.resolve(4L, OpenGlSampling.NEAREST));
-
-        driver.liveTextureIds.remove(textureId);
-        assertThrows(
-                OpenGlRenderException.class,
-                () -> cache.resolve(4L, OpenGlSampling.LINEAR));
-        driver.liveTextureIds.put(textureId, 4L);
+        assertEquals(
+                textureId,
+                cache.resolve(4L, OpenGlSampling.LINEAR).orElseThrow().textureId());
 
         cache.activate(List.of());
         assertTrue(cache.resolve(4L, OpenGlSampling.LINEAR).isEmpty());
@@ -172,6 +167,32 @@ class OpenGlTextTextureCacheTest {
                 () -> cache.activate(List.of(alphaRaster(4L, 64, Color.rgb(0xFFFFFF)))));
     }
 
+    @Test
+    void failedReplacementCanReactivateThePreviousRasterSet() {
+        FakeTextureDriver driver = new FakeTextureDriver();
+        OpenGlTextTextureCache cache = new OpenGlTextTextureCache(driver, 8L);
+        TextRaster previous = alphaRaster(1L, 71, Color.rgb(0xFFFFFF));
+        List<TextRaster> previousSet = List.of(previous);
+        cache.activate(previousSet);
+        int previousTexture = cache.resolve(1L, OpenGlSampling.LINEAR).orElseThrow().textureId();
+        driver.failOnCreateNumber = 3;
+
+        assertThrows(
+                OpenGlRenderException.class,
+                () -> cache.activate(List.of(
+                        alphaRaster(2L, 72, Color.rgb(0xFFFFFF)),
+                        alphaRaster(3L, 73, Color.rgb(0xFFFFFF)))));
+        assertTrue(driver.deletedTextureIds.contains(previousTexture));
+
+        driver.failOnCreateNumber = Integer.MAX_VALUE;
+        cache.activate(previousSet);
+
+        int restoredTexture = cache.resolve(1L, OpenGlSampling.LINEAR).orElseThrow().textureId();
+        assertTrue(restoredTexture != previousTexture);
+        assertEquals(new OpenGlTextTextureCache.CacheStats(1, 4L, 1), cache.stats());
+        cache.close();
+    }
+
     private static TextRaster alphaRaster(long textureKey, int digestSeed, Color modulationColor) {
         byte[] digest = new byte[32];
         Arrays.fill(digest, (byte) digestSeed);
@@ -195,7 +216,6 @@ class OpenGlTextTextureCacheTest {
     private static final class FakeTextureDriver implements OpenGlTextTextureCache.TextureDriver {
         private final List<Long> createdTextureKeys = new ArrayList<>();
         private final List<Integer> deletedTextureIds = new ArrayList<>();
-        private final Map<Integer, Long> liveTextureIds = new LinkedHashMap<>();
         private int nextTextureId = 100;
         private int createCalls;
         private int failOnCreateNumber = Integer.MAX_VALUE;
@@ -208,19 +228,12 @@ class OpenGlTextTextureCacheTest {
             }
             int textureId = nextTextureId++;
             createdTextureKeys.add(raster.textureKey());
-            liveTextureIds.put(textureId, raster.textureKey());
             return textureId;
         }
 
         @Override
         public void delete(int textureId) {
             deletedTextureIds.add(textureId);
-            liveTextureIds.remove(textureId);
-        }
-
-        @Override
-        public boolean isLive(int textureId) {
-            return liveTextureIds.containsKey(textureId);
         }
     }
 }

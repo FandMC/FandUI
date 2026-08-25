@@ -20,15 +20,20 @@ import cn.fandmc.fandui.api.layout.Point;
 import cn.fandmc.fandui.core.layout.LayoutSnapshot;
 import cn.fandmc.fandui.internal.event.EventListeners;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
 final class CoreEventDispatcher {
+    private static final int RESULT_CONSUMED = 1;
+    private static final int RESULT_DEFAULT_PREVENTED = 1 << 1;
+    private static final int MAX_RETAINED_FRAMES = 8;
+
     private final AbstractCoreSession session;
+    private final ArrayDeque<DispatchFrame> availableFrames = new ArrayDeque<>();
     private PointerEvent lastPointer;
 
     CoreEventDispatcher(AbstractCoreSession session) {
@@ -58,17 +63,17 @@ final class CoreEventDispatcher {
             } else if (pointer.action() == PointerAction.DOWN) {
                 session.pressed(target);
             }
-            DispatchState state = target == null ? new DispatchState() : dispatchTo(target, pointer);
+            int result = target == null ? 0 : dispatchTo(target, pointer);
             if (pointer.action() == PointerAction.DOWN
                     && target != null
-                    && !state.defaultPrevented) {
+                    && (result & RESULT_DEFAULT_PREVENTED) == 0) {
                 session.focusManager().request(target, FocusCause.POINTER, pointer.timestampNanos());
             }
             if (pointer.action() == PointerAction.UP || pointer.action() == PointerAction.CANCEL) {
                 session.pressed(null);
                 session.captured(null);
             }
-            return state.consumed;
+            return (result & RESULT_CONSUMED) != 0;
         }
         if (event instanceof ScrollEvent scroll) {
             target = hitTest(scroll.scenePosition());
@@ -85,7 +90,7 @@ final class CoreEventDispatcher {
                 target = session.root();
             }
         }
-        return target != null && dispatchTo(target, event).consumed;
+        return target != null && (dispatchTo(target, event) & RESULT_CONSUMED) != 0;
     }
 
     private void transitionHover(UiComponent next, PointerEvent source) {
@@ -169,37 +174,42 @@ final class CoreEventDispatcher {
         return layout == null ? null : layout.hitTest(scenePosition).orElse(null);
     }
 
-    private DispatchState dispatchTo(UiComponent target, UiEvent event) {
+    private int dispatchTo(UiComponent target, UiEvent event) {
         if (!session.contains(target)) {
-            return new DispatchState();
+            return 0;
         }
-        List<UiComponent> path = pathTo(target);
-        DispatchState state = new DispatchState();
+        DispatchFrame frame = acquireFrame();
+        try {
+            List<UiComponent> path = pathTo(target, frame.path);
+            DispatchState state = frame.state;
 
-        for (int index = 0; index < path.size() - 1; index++) {
-            invoke(path.get(index), target, event, EventPhase.CAPTURE, EventRoute.CAPTURE, state);
-            if (state.propagationStopped) {
-                return state;
+            for (int index = 0; index < path.size() - 1; index++) {
+                invoke(path.get(index), target, event, EventPhase.CAPTURE, EventRoute.CAPTURE, state);
+                if (state.propagationStopped) {
+                    return state.result();
+                }
             }
-        }
 
-        UiComponent targetComponent = path.get(path.size() - 1);
-        state.immediateStopped = false;
-        invokeHandlers(targetComponent, target, event, EventPhase.TARGET, EventRoute.CAPTURE, state);
-        if (!state.immediateStopped) {
-            invokeHandlers(targetComponent, target, event, EventPhase.TARGET, EventRoute.BUBBLE, state);
-        }
-        if (state.propagationStopped) {
-            return state;
-        }
-
-        for (int index = path.size() - 2; index >= 0; index--) {
-            invoke(path.get(index), target, event, EventPhase.BUBBLE, EventRoute.BUBBLE, state);
-            if (state.propagationStopped) {
-                break;
+            UiComponent targetComponent = path.get(path.size() - 1);
+            state.immediateStopped = false;
+            invokeHandlers(targetComponent, target, event, EventPhase.TARGET, EventRoute.CAPTURE, state);
+            if (!state.immediateStopped) {
+                invokeHandlers(targetComponent, target, event, EventPhase.TARGET, EventRoute.BUBBLE, state);
             }
+            if (state.propagationStopped) {
+                return state.result();
+            }
+
+            for (int index = path.size() - 2; index >= 0; index--) {
+                invoke(path.get(index), target, event, EventPhase.BUBBLE, EventRoute.BUBBLE, state);
+                if (state.propagationStopped) {
+                    break;
+                }
+            }
+            return state.result();
+        } finally {
+            releaseFrame(frame);
         }
-        return state;
     }
 
     private void invoke(
@@ -238,8 +248,7 @@ final class CoreEventDispatcher {
         }
     }
 
-    private List<UiComponent> pathTo(UiComponent target) {
-        List<UiComponent> path = new ArrayList<>();
+    private List<UiComponent> pathTo(UiComponent target, ArrayList<UiComponent> path) {
         UiComponent cursor = target;
         while (cursor != null) {
             path.add(cursor);
@@ -251,8 +260,31 @@ final class CoreEventDispatcher {
         if (path.isEmpty() || path.get(path.size() - 1) != session.root()) {
             throw new IllegalArgumentException("Event target does not belong to the current scene tree");
         }
-        Collections.reverse(path);
+        for (int left = 0, right = path.size() - 1; left < right; left++, right--) {
+            UiComponent component = path.get(left);
+            path.set(left, path.get(right));
+            path.set(right, component);
+        }
         return path;
+    }
+
+    private DispatchFrame acquireFrame() {
+        DispatchFrame frame = availableFrames.pollFirst();
+        if (frame == null) {
+            return new DispatchFrame();
+        }
+        return frame;
+    }
+
+    private void releaseFrame(DispatchFrame frame) {
+        frame.reset();
+        if (availableFrames.size() < MAX_RETAINED_FRAMES) {
+            availableFrames.addFirst(frame);
+        }
+    }
+
+    int retainedFrameCount() {
+        return availableFrames.size();
     }
 
     private final class CallbackContext implements EventContext {
@@ -382,5 +414,27 @@ final class CoreEventDispatcher {
         private boolean defaultPrevented;
         private boolean propagationStopped;
         private boolean immediateStopped;
+
+        private int result() {
+            return (consumed ? RESULT_CONSUMED : 0)
+                    | (defaultPrevented ? RESULT_DEFAULT_PREVENTED : 0);
+        }
+
+        private void reset() {
+            consumed = false;
+            defaultPrevented = false;
+            propagationStopped = false;
+            immediateStopped = false;
+        }
+    }
+
+    private static final class DispatchFrame {
+        private final ArrayList<UiComponent> path = new ArrayList<>(8);
+        private final DispatchState state = new DispatchState();
+
+        private void reset() {
+            path.clear();
+            state.reset();
+        }
     }
 }

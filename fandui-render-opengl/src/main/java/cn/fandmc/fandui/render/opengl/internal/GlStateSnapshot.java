@@ -182,11 +182,11 @@ public final class GlStateSnapshot {
         compare(differences, "renderbuffer", renderbuffer, actual.renderbuffer);
         compare(differences, "program", program, actual.program);
         compare(differences, "vertexArray", vertexArray, actual.vertexArray);
-        compare(differences, "bufferBindings", bufferBindings.same(actual.bufferBindings));
-        compare(differences, "textureBindings", textureBindings.same(actual.textureBindings));
-        compare(differences, "viewport", Arrays.equals(viewport, actual.viewport));
-        compare(differences, "scissorBox", Arrays.equals(scissorBox, actual.scissorBox));
-        compare(differences, "clearColor", Arrays.equals(clearColor, actual.clearColor));
+        compare(differences, "bufferBindings", bufferBindings, actual.bufferBindings);
+        compare(differences, "textureBindings", textureBindings, actual.textureBindings);
+        compare(differences, "viewport", viewport, actual.viewport);
+        compare(differences, "scissorBox", scissorBox, actual.scissorBox);
+        compare(differences, "clearColor", clearColor, actual.clearColor);
         compare(differences, "clearStencil", clearStencil, actual.clearStencil);
         compare(differences, "polygonMode", polygonMode, actual.polygonMode);
         compare(differences, "blend", blend, actual.blend);
@@ -204,15 +204,15 @@ public final class GlStateSnapshot {
         compare(differences, "blendDstAlpha", blendDstAlpha, actual.blendDstAlpha);
         compare(differences, "blendEquationRgb", blendEquationRgb, actual.blendEquationRgb);
         compare(differences, "blendEquationAlpha", blendEquationAlpha, actual.blendEquationAlpha);
-        compare(differences, "colorMask", Arrays.equals(colorMask, actual.colorMask));
+        compare(differences, "colorMask", colorMask, actual.colorMask);
         compare(differences, "depthMask", depthMask, actual.depthMask);
         compare(differences, "depthFunction", depthFunction, actual.depthFunction);
-        compare(differences, "depthRange", Arrays.equals(depthRange, actual.depthRange));
+        compare(differences, "depthRange", depthRange, actual.depthRange);
         compare(differences, "clipControl", clipControl.same(actual.clipControl));
         compare(differences, "frontFace", frontFace, actual.frontFace);
-        compare(differences, "frontStencil", frontStencil.same(actual.frontStencil));
-        compare(differences, "backStencil", backStencil.same(actual.backStencil));
-        compare(differences, "pixelStore", pixelStore.same(actual.pixelStore));
+        compare(differences, "frontStencil", frontStencil, actual.frontStencil);
+        compare(differences, "backStencil", backStencil, actual.backStencil);
+        compare(differences, "pixelStore", pixelStore, actual.pixelStore);
         return differences;
     }
 
@@ -226,13 +226,73 @@ public final class GlStateSnapshot {
 
     private static void compare(List<String> differences, String name, int expected, int actual) {
         if (expected != actual) {
-            differences.add(name);
+            differences.add(name + "[expected=" + expected + ", actual=" + actual + "]");
         }
     }
 
     private static void compare(List<String> differences, String name, boolean expected, boolean actual) {
         if (expected != actual) {
-            differences.add(name);
+            differences.add(name + "[expected=" + expected + ", actual=" + actual + "]");
+        }
+    }
+
+    private static void compare(List<String> differences, String name, int[] expected, int[] actual) {
+        if (!Arrays.equals(expected, actual)) {
+            differences.add(name + "[expected=" + Arrays.toString(expected)
+                    + ", actual=" + Arrays.toString(actual) + "]");
+        }
+    }
+
+    private static void compare(List<String> differences, String name, float[] expected, float[] actual) {
+        if (!Arrays.equals(expected, actual)) {
+            differences.add(name + "[expected=" + Arrays.toString(expected)
+                    + ", actual=" + Arrays.toString(actual) + "]");
+        }
+    }
+
+    private static void compare(List<String> differences, String name, double[] expected, double[] actual) {
+        if (!Arrays.equals(expected, actual)) {
+            differences.add(name + "[expected=" + Arrays.toString(expected)
+                    + ", actual=" + Arrays.toString(actual) + "]");
+        }
+    }
+
+    private static void compare(List<String> differences, String name, boolean[] expected, boolean[] actual) {
+        if (!Arrays.equals(expected, actual)) {
+            differences.add(name + "[expected=" + Arrays.toString(expected)
+                    + ", actual=" + Arrays.toString(actual) + "]");
+        }
+    }
+
+    private static void compare(
+            List<String> differences,
+            String name,
+            BufferBindings expected,
+            BufferBindings actual) {
+        if (!expected.same(actual)) {
+            differences.add(name + "[expected=" + expected + ", actual=" + actual + "]");
+        }
+    }
+
+    private static void compare(
+            List<String> differences,
+            String name,
+            TextureBindings expected,
+            TextureBindings actual) {
+        if (!expected.same(actual)) {
+            differences.add(name + "[expected=" + expected + ", actual=" + actual + "]");
+        }
+    }
+
+    private static void compare(List<String> differences, String name, StencilFace expected, StencilFace actual) {
+        if (!expected.same(actual)) {
+            differences.add(name + "[expected=" + expected + ", actual=" + actual + "]");
+        }
+    }
+
+    private static void compare(List<String> differences, String name, PixelStore expected, PixelStore actual) {
+        if (!expected.same(actual)) {
+            differences.add(name + "[expected=" + expected + ", actual=" + actual + "]");
         }
     }
 
@@ -303,6 +363,15 @@ public final class GlStateSnapshot {
                     && depthPass == other.depthPass
                     && writeMask == other.writeMask;
         }
+
+        @Override
+        public String toString() {
+            return "func=" + func
+                    + "/ref=" + ref
+                    + "/valueMask=" + valueMask
+                    + "/ops=" + fail + ':' + depthFail + ':' + depthPass
+                    + "/writeMask=" + writeMask;
+        }
     }
 
     private static final class BufferBindings {
@@ -321,6 +390,11 @@ public final class GlStateSnapshot {
 
         private boolean same(BufferBindings other) {
             return arrayBuffer == other.arrayBuffer && pixelUnpackBuffer == other.pixelUnpackBuffer;
+        }
+
+        @Override
+        public String toString() {
+            return "array=" + arrayBuffer + "/pixelUnpack=" + pixelUnpackBuffer;
         }
     }
 
@@ -362,6 +436,16 @@ public final class GlStateSnapshot {
                     && textureBufferUnit1 == other.textureBufferUnit1
                     && samplerUnit0 == other.samplerUnit0
                     && samplerUnit1 == other.samplerUnit1;
+        }
+
+        @Override
+        public String toString() {
+            return "active=" + activeTexture
+                    + "/2d0=" + texture2dUnit0
+                    + "/2d1=" + texture2dUnit1
+                    + "/buffer1=" + textureBufferUnit1
+                    + "/sampler0=" + samplerUnit0
+                    + "/sampler1=" + samplerUnit1;
         }
     }
 
@@ -406,6 +490,18 @@ public final class GlStateSnapshot {
                     && unpackAlignment == other.unpackAlignment
                     && unpackImageHeight == other.unpackImageHeight
                     && unpackSkipImages == other.unpackSkipImages;
+        }
+
+        @Override
+        public String toString() {
+            return "swap=" + unpackSwapBytes
+                    + "/lsb=" + unpackLeastSignificantBitFirst
+                    + "/rowLength=" + unpackRowLength
+                    + "/skipRows=" + unpackSkipRows
+                    + "/skipPixels=" + unpackSkipPixels
+                    + "/alignment=" + unpackAlignment
+                    + "/imageHeight=" + unpackImageHeight
+                    + "/skipImages=" + unpackSkipImages;
         }
     }
 }

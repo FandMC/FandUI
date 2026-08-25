@@ -5,7 +5,7 @@ run/
 logs/
 *.log
 hs_err_pid*.log
-
+artifacts
 **/build/
 **/run/
 **/logs/

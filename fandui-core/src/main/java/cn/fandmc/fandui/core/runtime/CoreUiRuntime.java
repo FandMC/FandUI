@@ -2,6 +2,7 @@ package cn.fandmc.fandui.core.runtime;
 
 import cn.fandmc.fandui.api.UiAvailability;
 import cn.fandmc.fandui.api.UiCapabilities;
+import cn.fandmc.fandui.api.UiDiagnostics;
 import cn.fandmc.fandui.api.UiRuntime;
 import cn.fandmc.fandui.api.UiRuntimeState;
 import cn.fandmc.fandui.api.UiUnavailableException;
@@ -32,6 +33,8 @@ public final class CoreUiRuntime implements UiRuntime {
     private final LongSupplier clock;
     private final AtomicReference<UiAvailability> availability = new AtomicReference<>(
             new UiAvailability(UiRuntimeState.STARTING, "bootstrap"));
+    private final AtomicReference<UiDiagnostics> diagnostics = new AtomicReference<>(
+            UiDiagnostics.unknown("bootstrap"));
     private final CoreScreenService screens;
     private final CoreHudService hud;
     private final AtomicBoolean cursorClosed = new AtomicBoolean();
@@ -65,6 +68,11 @@ public final class CoreUiRuntime implements UiRuntime {
     @Override
     public UiCapabilities capabilities() {
         return capabilities;
+    }
+
+    @Override
+    public UiDiagnostics diagnostics() {
+        return diagnostics.get();
     }
 
     @Override
@@ -136,8 +144,18 @@ public final class CoreUiRuntime implements UiRuntime {
         setOperationalState(UiRuntimeState.AVAILABLE, detail);
     }
 
+    /** Publishes a platform-observed immutable renderer snapshot. */
+    public void updateDiagnostics(UiDiagnostics value) {
+        assertUiThread();
+        if (availability.get().state() == UiRuntimeState.STOPPED) {
+            throw new IllegalStateException("FandUI runtime is stopped");
+        }
+        diagnostics.set(Objects.requireNonNull(value, "value"));
+    }
+
     public void markRendererUnavailable(String detail) {
         UiRuntimeState previous = setOperationalState(UiRuntimeState.RENDERER_UNAVAILABLE, detail);
+        diagnostics.updateAndGet(current -> current.withoutTarget(detail));
         if (previous == UiRuntimeState.AVAILABLE) {
             screens.closeCurrent(SessionCloseReason.FAILED, true);
             hud.closeAll(SessionCloseReason.FAILED);
@@ -148,6 +166,7 @@ public final class CoreUiRuntime implements UiRuntime {
         Objects.requireNonNull(detail, "detail");
         assertUiThread();
         availability.set(new UiAvailability(UiRuntimeState.FAILED, detail));
+        diagnostics.updateAndGet(current -> current.withoutTarget(detail));
         screens.closeCurrent(SessionCloseReason.FAILED, true);
         hud.closeAll(SessionCloseReason.FAILED);
     }
@@ -204,6 +223,7 @@ public final class CoreUiRuntime implements UiRuntime {
                 == UiRuntimeState.STOPPED) {
             return;
         }
+        diagnostics.updateAndGet(current -> current.withoutTarget("shutdown"));
         runCleanup(() -> {
             try {
                 screens.closeCurrent(SessionCloseReason.SHUTDOWN, false);

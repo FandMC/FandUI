@@ -22,6 +22,7 @@ public final class LayoutNode {
     private final UiComponent component;
     private final Point position;
     private final Size size;
+    private final Rect localBounds;
     private final Rect sceneBounds;
     private final int zIndex;
     private final boolean visible;
@@ -54,6 +55,7 @@ public final class LayoutNode {
         this.component = Objects.requireNonNull(component, "component");
         this.position = Objects.requireNonNull(position, "position");
         this.size = Objects.requireNonNull(size, "size");
+        this.localBounds = new Rect(0.0f, 0.0f, size.width(), size.height());
         this.sceneBounds = Objects.requireNonNull(sceneBounds, "sceneBounds");
         this.zIndex = zIndex;
         this.visible = component.visible();
@@ -81,6 +83,10 @@ public final class LayoutNode {
 
     public Size size() {
         return size;
+    }
+
+    public Rect localBounds() {
+        return localBounds;
     }
 
     public Rect sceneBounds() {

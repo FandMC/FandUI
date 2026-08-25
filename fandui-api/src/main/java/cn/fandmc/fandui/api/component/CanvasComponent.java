@@ -29,6 +29,7 @@ public final class CanvasComponent extends UiComponent {
     }
 
     public void setMeasure(CanvasMeasure measure) {
+        requireMutationThread();
         CanvasMeasure checked = Objects.requireNonNull(measure, "measure");
         if (this.measure != checked) {
             this.measure = checked;
@@ -37,6 +38,7 @@ public final class CanvasComponent extends UiComponent {
     }
 
     public void setPainter(CanvasPainter painter) {
+        requireMutationThread();
         CanvasPainter checked = Objects.requireNonNull(painter, "painter");
         if (this.painter != checked) {
             this.painter = checked;

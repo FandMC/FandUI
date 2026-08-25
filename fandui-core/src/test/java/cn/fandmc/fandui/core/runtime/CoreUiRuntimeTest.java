@@ -1,7 +1,10 @@
 package cn.fandmc.fandui.core.runtime;
 
 import cn.fandmc.fandui.api.UiCapabilities;
+import cn.fandmc.fandui.api.UiColorFormat;
+import cn.fandmc.fandui.api.UiDiagnostics;
 import cn.fandmc.fandui.api.UiKey;
+import cn.fandmc.fandui.api.UiRendererBackend;
 import cn.fandmc.fandui.api.UiRuntimeState;
 import cn.fandmc.fandui.api.UiUnavailableException;
 import cn.fandmc.fandui.api.animation.AnimationEndReason;
@@ -14,7 +17,10 @@ import cn.fandmc.fandui.api.component.UiContainer;
 import cn.fandmc.fandui.api.event.EventContext;
 import cn.fandmc.fandui.api.event.EventRegistration;
 import cn.fandmc.fandui.api.event.EventRoute;
+import cn.fandmc.fandui.api.event.KeyAction;
+import cn.fandmc.fandui.api.event.KeyEvent;
 import cn.fandmc.fandui.api.event.KeyModifier;
+import cn.fandmc.fandui.api.event.Keys;
 import cn.fandmc.fandui.api.event.PointerAction;
 import cn.fandmc.fandui.api.event.PointerButton;
 import cn.fandmc.fandui.api.event.PointerEvent;
@@ -320,6 +326,44 @@ class CoreUiRuntimeTest {
     }
 
     @Test
+    void reusesRoutingFramesWithoutSharingNestedDispatchState() {
+        Fixture fixture = new Fixture();
+        fixture.runtime.markAvailable("ready");
+        TestLeaf root = new TestLeaf(null, 100.0f, 80.0f);
+        CoreScreenSession session = (CoreScreenSession) fixture.runtime.screens().open(
+                UiScreen.of("Nested events", root));
+        fixture.runtime.renderFrames(VIEWPORT, 1L);
+
+        KeyEvent outer = new KeyEvent(Keys.letter('a'), KeyAction.PRESS, Set.of(), 2L);
+        KeyEvent nested = new KeyEvent(Keys.letter('b'), KeyAction.PRESS, Set.of(), 3L);
+        AtomicReference<EventContext> expiredOuter = new AtomicReference<>();
+        AtomicReference<EventContext> expiredNested = new AtomicReference<>();
+        AtomicLong nestedDeliveries = new AtomicLong();
+        root.on(KeyEvent.class, EventRoute.BUBBLE, (event, context) -> {
+            if (event.key().equals(nested.key())) {
+                expiredNested.compareAndSet(null, context);
+                nestedDeliveries.incrementAndGet();
+                context.consume();
+                return;
+            }
+            expiredOuter.compareAndSet(null, context);
+            assertFalse(context.consumed());
+            assertTrue(session.dispatch(nested));
+            assertFalse(context.consumed());
+            assertEquals(root, context.currentTarget());
+        });
+
+        for (int index = 0; index < 1_000; index++) {
+            assertFalse(session.dispatch(outer));
+        }
+
+        assertEquals(1_000L, nestedDeliveries.get());
+        assertEquals(2, session.events().retainedFrameCount());
+        assertThrows(IllegalStateException.class, () -> expiredOuter.get().phase());
+        assertThrows(IllegalStateException.class, () -> expiredNested.get().phase());
+    }
+
+    @Test
     void focusClearsImmediatelyWhenComponentOrAncestorBecomesIneligible() {
         Fixture fixture = new Fixture();
         fixture.runtime.markAvailable("ready");
@@ -339,6 +383,56 @@ class CoreUiRuntimeTest {
         assertTrue(session.focus().request(child));
         root.setVisible(false);
         assertTrue(session.focus().focused().isEmpty());
+    }
+
+    @Test
+    void attachedChildReplacementUpdatesBindingsAndAllowsReusingTheSameKey() {
+        Fixture fixture = new Fixture();
+        fixture.runtime.markAvailable("ready");
+        UiKey key = UiKey.of("test", "replace-same-key");
+        TestContainer root = new TestContainer(null);
+        TestLeaf previous = new TestLeaf(key, 10.0f, 10.0f);
+        TestLeaf replacement = new TestLeaf(key, 20.0f, 20.0f);
+        root.add(previous);
+        CoreScreenSession session = (CoreScreenSession) fixture.runtime.screens().open(
+                UiScreen.of("Replace", root));
+
+        assertSame(previous, root.replace(0, replacement));
+
+        assertTrue(session.active());
+        assertSame(replacement, session.find(key).orElseThrow());
+        assertEquals(1, previous.detached);
+        assertEquals(1, replacement.attached);
+        assertTrue(previous.parent().isEmpty());
+        assertSame(root, replacement.parent().orElseThrow());
+    }
+
+    @Test
+    void failedAttachedReplacementRestoresTreeBeforeClosingFaultedSession() {
+        Fixture fixture = new Fixture();
+        fixture.runtime.markAvailable("ready");
+        TestContainer root = new TestContainer(null);
+        TestLeaf previous = new TestLeaf(UiKey.of("test", "replace-old"), 10.0f, 10.0f);
+        TestLeaf failing = new TestLeaf(UiKey.of("test", "replace-new"), 20.0f, 20.0f) {
+            @Override
+            public void attached(ComponentContext context) {
+                super.attached(context);
+                throw new IllegalStateException("attach failure");
+            }
+        };
+        root.add(previous);
+        CoreScreenSession session = (CoreScreenSession) fixture.runtime.screens().open(
+                UiScreen.of("Replace failure", root));
+
+        assertThrows(IllegalStateException.class, () -> root.replace(0, failing));
+
+        assertSame(previous, root.children().get(0));
+        assertSame(root, previous.parent().orElseThrow());
+        assertTrue(failing.parent().isEmpty());
+        assertFalse(session.active());
+        assertEquals(0, previous.detached);
+        fixture.dispatcher.drain();
+        assertEquals(1, previous.detached);
     }
 
     @Test
@@ -450,6 +544,62 @@ class CoreUiRuntimeTest {
         fixture.runtime.stop();
         assertEquals(UiRuntimeState.STOPPED, fixture.runtime.availability().state());
         assertTrue(fixture.runtime.execute(() -> { }).isCompletedExceptionally());
+    }
+
+    @Test
+    void diagnosticsPublishAtomicallyAndDropTargetStateOnRendererLoss() throws Exception {
+        Fixture fixture = new Fixture();
+        assertEquals(UiRendererBackend.UNKNOWN, fixture.runtime.diagnostics().backend());
+        UiDiagnostics ready = UiDiagnostics.ready(
+                UiRendererBackend.OPENGL,
+                "test-opengl",
+                200,
+                160,
+                UiColorFormat.RGBA8_UNORM,
+                8192,
+                true,
+                true,
+                "ready");
+        fixture.runtime.updateDiagnostics(ready);
+
+        AtomicReference<UiDiagnostics> observed = new AtomicReference<>();
+        Thread reader = new Thread(
+                () -> observed.set(fixture.runtime.diagnostics()),
+                "diagnostics-reader-test");
+        reader.start();
+        reader.join();
+        assertSame(ready, observed.get());
+
+        fixture.runtime.markAvailable("ready");
+        fixture.runtime.markRendererUnavailable("lost");
+        UiDiagnostics lost = fixture.runtime.diagnostics();
+        assertEquals(UiRendererBackend.OPENGL, lost.backend());
+        assertFalse(lost.targetReady());
+        assertEquals(8192, lost.maximumTextureSize());
+        assertEquals("lost", lost.detail());
+    }
+
+    @Test
+    void attachedComponentTreeRejectsMutationFromAnotherThread() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.runtime.markAvailable("ready");
+        TestContainer root = new TestContainer(null);
+        root.add(new TestLeaf(null, 10.0f, 10.0f));
+        fixture.runtime.screens().open(UiScreen.builder("Thread confinement", root).build());
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+
+        Thread mutator = new Thread(() -> {
+            try {
+                root.add(new TestLeaf(null, 10.0f, 10.0f));
+            } catch (Throwable throwable) {
+                failure.set(throwable);
+            }
+        }, "component-tree-wrong-thread-test");
+        mutator.start();
+        mutator.join();
+
+        assertTrue(failure.get() instanceof IllegalStateException);
+        assertEquals(1, root.children().size());
     }
 
     @Test

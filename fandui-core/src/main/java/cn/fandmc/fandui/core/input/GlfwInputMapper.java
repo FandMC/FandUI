@@ -6,6 +6,8 @@ import cn.fandmc.fandui.api.event.Keys;
 import cn.fandmc.fandui.api.event.PointerButton;
 
 import java.util.EnumSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 
 /** Maps stable GLFW numeric input values without exposing LWJGL in the core module. */
@@ -16,22 +18,29 @@ public final class GlfwInputMapper {
     private static final int MOD_SUPER = 0x0008;
     private static final int MOD_CAPS_LOCK = 0x0010;
     private static final int MOD_NUM_LOCK = 0x0020;
+    private static final int KNOWN_MODIFIERS = MOD_SHIFT | MOD_CONTROL | MOD_ALT
+            | MOD_SUPER | MOD_CAPS_LOCK | MOD_NUM_LOCK;
+    private static final KeyCode[] LETTER_KEYS = createLetterKeys();
+    private static final KeyCode[] DIGIT_KEYS = createDigitKeys();
+    private static final KeyCode[] FUNCTION_KEYS = createFunctionKeys();
+    private static final KeyCode[] KEYPAD_DIGIT_KEYS = createKeypadDigitKeys();
+    private static final List<Set<KeyModifier>> MODIFIER_SETS = createModifierSets();
 
     private GlfwInputMapper() {
     }
 
     public static KeyCode key(int key) {
         if (key >= 65 && key <= 90) {
-            return Keys.letter((char) ('a' + key - 65));
+            return LETTER_KEYS[key - 65];
         }
         if (key >= 48 && key <= 57) {
-            return Keys.digit(key - 48);
+            return DIGIT_KEYS[key - 48];
         }
         if (key >= 290 && key <= 314) {
-            return Keys.function(key - 289);
+            return FUNCTION_KEYS[key - 290];
         }
         if (key >= 320 && key <= 329) {
-            return Keys.keypadDigit(key - 320);
+            return KEYPAD_DIGIT_KEYS[key - 320];
         }
         return switch (key) {
             case 32 -> Keys.SPACE;
@@ -58,28 +67,61 @@ public final class GlfwInputMapper {
     }
 
     public static Set<KeyModifier> modifiers(int modifiers) {
-        EnumSet<KeyModifier> result = EnumSet.noneOf(KeyModifier.class);
-        add(result, modifiers, MOD_SHIFT, KeyModifier.SHIFT);
-        add(result, modifiers, MOD_CONTROL, KeyModifier.CONTROL);
-        add(result, modifiers, MOD_ALT, KeyModifier.ALT);
-        add(result, modifiers, MOD_SUPER, KeyModifier.SUPER);
-        add(result, modifiers, MOD_CAPS_LOCK, KeyModifier.CAPS_LOCK);
-        add(result, modifiers, MOD_NUM_LOCK, KeyModifier.NUM_LOCK);
-        return Set.copyOf(result);
+        return MODIFIER_SETS.get(modifiers & KNOWN_MODIFIERS);
     }
 
     public static Set<KeyModifier> modifiers(boolean shift, boolean control, boolean alt) {
-        EnumSet<KeyModifier> result = EnumSet.noneOf(KeyModifier.class);
-        if (shift) {
-            result.add(KeyModifier.SHIFT);
+        int modifiers = (shift ? MOD_SHIFT : 0)
+                | (control ? MOD_CONTROL : 0)
+                | (alt ? MOD_ALT : 0);
+        return modifiers(modifiers);
+    }
+
+    private static KeyCode[] createLetterKeys() {
+        KeyCode[] result = new KeyCode[26];
+        for (int index = 0; index < result.length; index++) {
+            result[index] = Keys.letter((char) ('a' + index));
         }
-        if (control) {
-            result.add(KeyModifier.CONTROL);
+        return result;
+    }
+
+    private static KeyCode[] createDigitKeys() {
+        KeyCode[] result = new KeyCode[10];
+        for (int index = 0; index < result.length; index++) {
+            result[index] = Keys.digit(index);
         }
-        if (alt) {
-            result.add(KeyModifier.ALT);
+        return result;
+    }
+
+    private static KeyCode[] createFunctionKeys() {
+        KeyCode[] result = new KeyCode[25];
+        for (int index = 0; index < result.length; index++) {
+            result[index] = Keys.function(index + 1);
         }
-        return Set.copyOf(result);
+        return result;
+    }
+
+    private static KeyCode[] createKeypadDigitKeys() {
+        KeyCode[] result = new KeyCode[10];
+        for (int index = 0; index < result.length; index++) {
+            result[index] = Keys.keypadDigit(index);
+        }
+        return result;
+    }
+
+    private static List<Set<KeyModifier>> createModifierSets() {
+        List<Set<KeyModifier>> result = new ArrayList<>(KNOWN_MODIFIERS + 1);
+        for (int modifiers = 0; modifiers <= KNOWN_MODIFIERS; modifiers++) {
+            EnumSet<KeyModifier> values = EnumSet.noneOf(KeyModifier.class);
+            add(values, modifiers, MOD_SHIFT, KeyModifier.SHIFT);
+            add(values, modifiers, MOD_CONTROL, KeyModifier.CONTROL);
+            add(values, modifiers, MOD_ALT, KeyModifier.ALT);
+            add(values, modifiers, MOD_SUPER, KeyModifier.SUPER);
+            add(values, modifiers, MOD_CAPS_LOCK, KeyModifier.CAPS_LOCK);
+            add(values, modifiers, MOD_NUM_LOCK, KeyModifier.NUM_LOCK);
+            result.add(Set.copyOf(values));
+        }
+        return List.copyOf(result);
     }
 
     private static void add(

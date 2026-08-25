@@ -9,8 +9,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Set;
@@ -24,8 +22,8 @@ final class PngImageDecoder {
     private static final byte[] SIGNATURE = {
             (byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A
     };
-    private static final byte[] CACHE_KEY_VERSION =
-            "FandUI static PNG RGBA8 premultiplied v1".getBytes(StandardCharsets.US_ASCII);
+    private static final String CACHE_KEY_VERSION =
+            "FandUI static PNG RGBA8 premultiplied v1";
     private static final Set<String> CRITICAL_CHUNKS = Set.of("IHDR", "PLTE", "IDAT", "IEND");
     private static final Set<String> ANIMATION_CHUNKS = Set.of("acTL", "fcTL", "fdAT");
 
@@ -48,10 +46,10 @@ final class PngImageDecoder {
         }
 
         BufferedImage image = readImage(encoded, header);
-        byte[] pixels = toPremultipliedRgba(image);
-        byte[] digest = digest(header.width, header.height, pixels);
+        byte[] pixels = ImageDecodeSupport.toPremultipliedRgba(image);
+        byte[] digest = ImageDecodeSupport.digest(CACHE_KEY_VERSION, header.width, header.height, pixels);
         return new DecodedImage(
-                textureKey(digest),
+                ImageDecodeSupport.textureKey(digest),
                 digest,
                 header.width,
                 header.height,
@@ -185,64 +183,6 @@ final class PngImageDecoder {
                 reader.dispose();
             }
         }
-    }
-
-    private static byte[] toPremultipliedRgba(BufferedImage image) {
-        int width = image.getWidth();
-        int height = image.getHeight();
-        byte[] result = new byte[Math.multiplyExact(Math.multiplyExact(width, height), 4)];
-        int[] row = new int[width];
-        int output = 0;
-        for (int y = 0; y < height; y++) {
-            image.getRGB(0, y, width, 1, row, 0, width);
-            for (int argb : row) {
-                int alpha = argb >>> 24;
-                int red = (argb >>> 16) & 0xFF;
-                int green = (argb >>> 8) & 0xFF;
-                int blue = argb & 0xFF;
-                result[output++] = (byte) premultiply(red, alpha);
-                result[output++] = (byte) premultiply(green, alpha);
-                result[output++] = (byte) premultiply(blue, alpha);
-                result[output++] = (byte) alpha;
-            }
-        }
-        return result;
-    }
-
-    private static int premultiply(int channel, int alpha) {
-        return alpha == 0 ? 0 : (channel * alpha + 127) / 255;
-    }
-
-    private static byte[] digest(int width, int height, byte[] pixels) {
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is unavailable", exception);
-        }
-        putInt(digest, CACHE_KEY_VERSION.length);
-        digest.update(CACHE_KEY_VERSION);
-        putInt(digest, width);
-        putInt(digest, height);
-        digest.update(pixels);
-        return digest.digest();
-    }
-
-    private static void putInt(MessageDigest digest, int value) {
-        digest.update((byte) (value >>> 24));
-        digest.update((byte) (value >>> 16));
-        digest.update((byte) (value >>> 8));
-        digest.update((byte) value);
-    }
-
-    private static long textureKey(byte[] digest) {
-        ByteBuffer keys = ByteBuffer.wrap(digest).order(ByteOrder.BIG_ENDIAN);
-        long first = keys.getLong();
-        if (first != 0L) {
-            return first;
-        }
-        long second = keys.getLong();
-        return second == 0L ? 1L : second;
     }
 
     private static boolean validBitDepth(int bitDepth, int colorType) {

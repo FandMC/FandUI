@@ -755,9 +755,10 @@ final class NanoVgBackdropBlur implements AutoCloseable {
     }
 
     private static Target createTarget(int width, int height) {
-        int activeTexture = glGetInteger(GL_ACTIVE_TEXTURE);
+        boolean preserveBinding = !OpenGlPassScope.isActive();
+        int activeTexture = preserveBinding ? glGetInteger(GL_ACTIVE_TEXTURE) : GL_TEXTURE0;
         glActiveTexture(GL_TEXTURE0);
-        int previousTexture = glGetInteger(GL_TEXTURE_BINDING_2D);
+        int previousTexture = preserveBinding ? glGetInteger(GL_TEXTURE_BINDING_2D) : 0;
         int texture = 0;
         int framebuffer = 0;
         boolean complete = false;
@@ -799,8 +800,10 @@ final class NanoVgBackdropBlur implements AutoCloseable {
             complete = true;
             return new Target(framebuffer, texture);
         } finally {
-            glBindTexture(GL_TEXTURE_2D, previousTexture);
-            glActiveTexture(activeTexture);
+            if (preserveBinding) {
+                glBindTexture(GL_TEXTURE_2D, previousTexture);
+                glActiveTexture(activeTexture);
+            }
             if (!complete) {
                 if (framebuffer != 0) {
                     glDeleteFramebuffers(framebuffer);

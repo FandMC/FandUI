@@ -38,7 +38,7 @@ class OpenGlImageTextureCacheTest {
         assertTrue(cache.resolve(3L, OpenGlSampling.NEAREST).isPresent());
         assertTrue(driver.deletedTextureIds.contains(secondId));
         assertFalse(driver.deletedTextureIds.contains(firstId));
-        assertEquals(OpenGlSampling.NEAREST, driver.lastSampling.get(driver.lastCreatedTextureId()));
+        assertTrue(driver.liveTextureIds.containsKey(driver.lastCreatedTextureId()));
         cache.close();
     }
 
@@ -65,22 +65,16 @@ class OpenGlImageTextureCacheTest {
     }
 
     @Test
-    void resolvesOnlyActiveLiveTexturesAndAppliesRequestedSampling() {
+    void resolvesOnlyActiveOwnedTexturesWithoutChangingSampling() {
         FakeTextureDriver driver = new FakeTextureDriver();
         OpenGlImageTextureCache cache = new OpenGlImageTextureCache(driver, 16L);
         cache.activate(List.of(raster(4L, 41)));
 
         int textureId = cache.resolve(4L, OpenGlSampling.NEAREST).orElseThrow().textureId();
-        assertEquals(OpenGlSampling.NEAREST, driver.lastSampling.get(textureId));
-        cache.resolve(4L, OpenGlSampling.LINEAR);
-        assertEquals(OpenGlSampling.LINEAR, driver.lastSampling.get(textureId));
+        assertEquals(
+                textureId,
+                cache.resolve(4L, OpenGlSampling.LINEAR).orElseThrow().textureId());
         assertTrue(cache.resolve(99L, OpenGlSampling.LINEAR).isEmpty());
-
-        driver.liveTextureIds.remove(textureId);
-        assertThrows(
-                OpenGlRenderException.class,
-                () -> cache.resolve(4L, OpenGlSampling.LINEAR));
-        driver.liveTextureIds.put(textureId, 4L);
 
         cache.activate(List.of());
         assertTrue(cache.resolve(4L, OpenGlSampling.LINEAR).isEmpty());
@@ -129,6 +123,30 @@ class OpenGlImageTextureCacheTest {
         cache.close();
     }
 
+    @Test
+    void failedReplacementCanReactivateThePreviousRasterSet() {
+        FakeTextureDriver driver = new FakeTextureDriver();
+        OpenGlImageTextureCache cache = new OpenGlImageTextureCache(driver, 16L);
+        ImageRaster previous = raster(1L, 71);
+        List<ImageRaster> previousSet = List.of(previous);
+        cache.activate(previousSet);
+        int previousTexture = cache.resolve(1L, OpenGlSampling.LINEAR).orElseThrow().textureId();
+        driver.failOnCreateNumber = 3;
+
+        assertThrows(
+                OpenGlRenderException.class,
+                () -> cache.activate(List.of(raster(2L, 72), raster(3L, 73))));
+        assertTrue(driver.deletedTextureIds.contains(previousTexture));
+
+        driver.failOnCreateNumber = Integer.MAX_VALUE;
+        cache.activate(previousSet);
+
+        int restoredTexture = cache.resolve(1L, OpenGlSampling.LINEAR).orElseThrow().textureId();
+        assertTrue(restoredTexture != previousTexture);
+        assertEquals(new OpenGlImageTextureCache.CacheStats(1, 8L, 1), cache.stats());
+        cache.close();
+    }
+
     private static ImageRaster raster(long textureKey, int digestSeed) {
         byte[] digest = new byte[32];
         Arrays.fill(digest, (byte) digestSeed);
@@ -148,7 +166,6 @@ class OpenGlImageTextureCacheTest {
         private final List<Long> createdTextureKeys = new ArrayList<>();
         private final List<Integer> deletedTextureIds = new ArrayList<>();
         private final Map<Integer, Long> liveTextureIds = new LinkedHashMap<>();
-        private final Map<Integer, OpenGlSampling> lastSampling = new LinkedHashMap<>();
         private int nextTextureId = 100;
         private int createCalls;
         private int failOnCreateNumber = Integer.MAX_VALUE;
@@ -166,20 +183,9 @@ class OpenGlImageTextureCacheTest {
         }
 
         @Override
-        public void configureSampling(int textureId, OpenGlSampling sampling) {
-            lastSampling.put(textureId, sampling);
-        }
-
-        @Override
         public void delete(int textureId) {
             deletedTextureIds.add(textureId);
             liveTextureIds.remove(textureId);
-            lastSampling.remove(textureId);
-        }
-
-        @Override
-        public boolean isLive(int textureId) {
-            return liveTextureIds.containsKey(textureId);
         }
 
         private int lastCreatedTextureId() {

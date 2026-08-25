@@ -1,6 +1,9 @@
 package cn.fandmc.fandui.fabric.v1214;
 
 import cn.fandmc.fandui.api.UiCapabilities;
+import cn.fandmc.fandui.api.UiColorFormat;
+import cn.fandmc.fandui.api.UiDiagnostics;
+import cn.fandmc.fandui.api.UiRendererBackend;
 import cn.fandmc.fandui.api.UiRuntimeState;
 import cn.fandmc.fandui.api.session.UiViewport;
 import cn.fandmc.fandui.core.resource.CoreResourceService;
@@ -11,6 +14,7 @@ import cn.fandmc.fandui.core.runtime.UiThreadDispatcher;
 import cn.fandmc.fandui.internal.FandUiRuntimeBinder;
 import cn.fandmc.fandui.internal.demo.BlurDemoHud;
 import cn.fandmc.fandui.internal.demo.FandUiDemoScreen;
+import cn.fandmc.fandui.internal.demo.FandUiTestScreen;
 import cn.fandmc.fandui.render.opengl.OpenGlBatchProbe;
 import cn.fandmc.fandui.render.opengl.OpenGlRenderReport;
 import cn.fandmc.fandui.render.opengl.OpenGlProbe;
@@ -53,7 +57,9 @@ public final class FandUiClient1214 implements ClientModInitializer {
     private static OpenGlUiPipeline pipeline;
     private static UiViewport cachedViewport;
     private static FandUiDemoScreen demoScreen;
+    private static FandUiTestScreen testScreen;
     private static boolean demoKeyWasDown;
+    private static boolean testKeyWasDown;
     private static boolean hookObserved;
     private static boolean probeFailed;
     private static boolean hudRenderedThisFrame;
@@ -63,7 +69,8 @@ public final class FandUiClient1214 implements ClientModInitializer {
     public void onInitializeClient() {
         MinecraftDispatcher dispatcher = new MinecraftDispatcher();
         resources = new CoreResourceService(dispatcher);
-        textService = new SkijaTextService(resources::generation);
+        textService = new SkijaTextService(resources::fontSnapshot);
+        resources.setFontValidator(textService::validateFonts);
         runtime = new CoreUiRuntime(
                 dispatcher,
                 new MinecraftScreenHost1214(CLOCK),
@@ -82,6 +89,7 @@ public final class FandUiClient1214 implements ClientModInitializer {
         initializeRenderer();
         mountBlurDemo();
         initializeScreenDemo();
+        initializeTestScreen();
         ClientLifecycleEvents.CLIENT_STOPPING.register(client -> closeRuntime());
 
         LOGGER.info("FandUI 1.21.4 initialized in state {}; target probe is {}, batch probe is {}",
@@ -129,6 +137,11 @@ public final class FandUiClient1214 implements ClientModInitializer {
     }
 
     private static void initializeRenderer() {
+        runtime.updateDiagnostics(UiDiagnostics.detached(
+                UiRendererBackend.OPENGL,
+                HOST.name(),
+                0,
+                "OpenGL renderer initialized; waiting for a validated Minecraft color target"));
         try {
             pipeline = new OpenGlUiPipeline(HOST, resources, textService);
             runtime.markAvailable("Minecraft OpenGL + LWJGL NanoVGGL3");
@@ -170,6 +183,35 @@ public final class FandUiClient1214 implements ClientModInitializer {
             demoScreen = null;
             demoKeyWasDown = false;
             LOGGER.error("FandUI Screen development demo failed and has been disabled", exception);
+        }
+    }
+
+    private static void initializeTestScreen() {
+        FandUiTestScreen.installIfEnabled(runtime).ifPresent(installed -> {
+            testScreen = installed;
+            ClientTickEvents.END_CLIENT_TICK.register(FandUiClient1214::pollTestScreen);
+            LOGGER.info("FandUI comprehensive test Screen enabled; press F9 to reopen it");
+        });
+    }
+
+    private static void pollTestScreen(Minecraft client) {
+        FandUiTestScreen current = testScreen;
+        if (stopping || current == null) {
+            return;
+        }
+        try {
+            boolean keyDown = InputConstants.isKeyDown(
+                    client.getWindow().getWindow(),
+                    GLFW.GLFW_KEY_F9);
+            boolean requested = keyDown && !testKeyWasDown;
+            testKeyWasDown = keyDown;
+            if (current.openIfRequested(requested)) {
+                LOGGER.info("FandUI opened the comprehensive test Screen");
+            }
+        } catch (RuntimeException exception) {
+            testScreen = null;
+            testKeyWasDown = false;
+            LOGGER.error("FandUI comprehensive test Screen failed and has been disabled", exception);
         }
     }
 
@@ -219,6 +261,7 @@ public final class FandUiClient1214 implements ClientModInitializer {
     private static UiViewport currentViewport() {
         OpenGlTarget target = HOST.currentTarget().orElse(null);
         if (target == null) {
+            detachDiagnostics("Minecraft OpenGL color target is not ready");
             cachedViewport = null;
             return null;
         }
@@ -236,6 +279,9 @@ public final class FandUiClient1214 implements ClientModInitializer {
                 || current.framebufferWidth() != target.width()
                 || current.framebufferHeight() != target.height()
                 || Float.compare(current.devicePixelRatio(), scale) != 0) {
+            if (current != null) {
+                detachDiagnostics("Minecraft OpenGL color target changed; waiting for validation");
+            }
             current = new UiViewport(logicalWidth, logicalHeight, target.width(), target.height(), scale);
             cachedViewport = current;
         }
@@ -273,6 +319,20 @@ public final class FandUiClient1214 implements ClientModInitializer {
     }
 
     private static void reportPipelineTarget(OpenGlRenderReport report) {
+        CoreUiRuntime currentRuntime = runtime;
+        OpenGlUiPipeline currentPipeline = pipeline;
+        if (currentRuntime != null && currentPipeline != null) {
+            currentRuntime.updateDiagnostics(UiDiagnostics.ready(
+                    UiRendererBackend.OPENGL,
+                    report.hostName(),
+                    report.width(),
+                    report.height(),
+                    UiColorFormat.RGBA8_UNORM,
+                    currentPipeline.maxTextureSize(),
+                    true,
+                    true,
+                    "Minecraft OpenGL color target validated by the FandUI NanoVG pass"));
+        }
         if (report.status() == OpenGlRenderReport.Status.TARGET_REBUILT) {
             LOGGER.info(
                     "FandUI UI renderer attached {}x{} target and rendered {} batches in {} draw calls to FBO {}",
@@ -282,6 +342,14 @@ public final class FandUiClient1214 implements ClientModInitializer {
                     report.drawCalls(),
                     report.framebuffer());
         }
+    }
+
+    private static void detachDiagnostics(String detail) {
+        CoreUiRuntime currentRuntime = runtime;
+        if (currentRuntime == null || !currentRuntime.diagnostics().targetReady()) {
+            return;
+        }
+        currentRuntime.updateDiagnostics(currentRuntime.diagnostics().withoutTarget(detail));
     }
 
     private static void reportHookOnce() {

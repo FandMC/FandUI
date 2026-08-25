@@ -11,6 +11,7 @@ import cn.fandmc.fandui.api.resource.ResourceService;
 import cn.fandmc.fandui.api.resource.ResourceSource;
 import cn.fandmc.fandui.api.resource.ResourceState;
 import cn.fandmc.fandui.api.text.FontFamily;
+import cn.fandmc.fandui.api.text.FontFamilies;
 import cn.fandmc.fandui.core.runtime.UiThreadDispatcher;
 
 import java.io.FileNotFoundException;
@@ -32,8 +33,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 /**
  * Owns stable resource handles and atomically publishes decoded resource generations.
@@ -46,12 +47,12 @@ public final class CoreResourceService implements ResourceService, AutoCloseable
 
     private final UiThreadDispatcher dispatcher;
     private final ExecutorService reloadExecutor;
-    private final AtomicLong generation = new AtomicLong();
     private final ConcurrentMap<UiKey, CoreImageRef> images = new ConcurrentHashMap<>();
     private final ConcurrentMap<UiKey, FontFamily> fonts = new ConcurrentHashMap<>();
     private final Map<ResourceSlot, CoreRegistration> registrations = new LinkedHashMap<>();
     private final List<ReloadRegistration> reloadListeners = new ArrayList<>();
-    private volatile Map<UiKey, byte[]> fontBytes = Map.of();
+    private volatile FontResourceSnapshot fontSnapshot = FontResourceSnapshot.empty(0L);
+    private Consumer<FontResourceSnapshot> fontValidator = ignored -> { };
     private volatile ResourceLookup lastLookup = ResourceLookup.empty();
     private long registrationRevision;
     private boolean reloadInProgress;
@@ -68,7 +69,7 @@ public final class CoreResourceService implements ResourceService, AutoCloseable
 
     @Override
     public long generation() {
-        return generation.get();
+        return fontSnapshot.generation();
     }
 
     @Override
@@ -82,6 +83,9 @@ public final class CoreResourceService implements ResourceService, AutoCloseable
     public FontFamily font(UiKey key) {
         Objects.requireNonNull(key, "key");
         requireOpen();
+        if (key.equals(FontFamilies.DEFAULT.key())) {
+            return FontFamilies.DEFAULT;
+        }
         return fonts.computeIfAbsent(key, FontFamily::new);
     }
 
@@ -189,8 +193,20 @@ public final class CoreResourceService implements ResourceService, AutoCloseable
 
     Optional<byte[]> fontBytes(FontFamily family) {
         Objects.requireNonNull(family, "family");
-        byte[] bytes = fontBytes.get(family.key());
+        byte[] bytes = fontSnapshot.copyFonts().get(family.key());
         return bytes == null ? Optional.empty() : Optional.of(bytes.clone());
+    }
+
+    public FontResourceSnapshot fontSnapshot() {
+        return fontSnapshot;
+    }
+
+    /** Installs the production text implementation's candidate-generation validator. */
+    public void setFontValidator(Consumer<FontResourceSnapshot> validator) {
+        Objects.requireNonNull(validator, "validator");
+        assertUiThread();
+        requireOpen();
+        fontValidator = validator;
     }
 
     private ReloadSnapshot snapshot(ResourceLookup lookup) {
@@ -246,7 +262,7 @@ public final class CoreResourceService implements ResourceService, AutoCloseable
                 if (plan.slot.kind == ResourceKind.IMAGE) {
                     imageResults.put(
                             plan.slot.key,
-                            ImageResult.decoded(PngImageDecoder.decode(bytes)));
+                            ImageResult.decoded(ImageDecoder.decode(bytes, plan.source.format())));
                 } else {
                     if (bytes.length == 0 || bytes.length > MAX_FONT_BYTES) {
                         throw new IOException("Font source has an invalid byte length");
@@ -289,10 +305,17 @@ public final class CoreResourceService implements ResourceService, AutoCloseable
 
         long newGeneration;
         try {
-            newGeneration = Math.incrementExact(generation.get());
+            newGeneration = Math.incrementExact(fontSnapshot.generation());
         } catch (ArithmeticException exception) {
             restoreLoadingStates(candidate.snapshot);
             throw new IllegalStateException("FandUI resource generation is exhausted", exception);
+        }
+        FontResourceSnapshot candidateFonts = FontResourceSnapshot.create(newGeneration, candidate.fonts);
+        try {
+            fontValidator.accept(candidateFonts);
+        } catch (RuntimeException | Error exception) {
+            restoreLoadingStates(candidate.snapshot);
+            throw new ResourceReloadException("FandUI custom font validation failed", exception);
         }
         for (Map.Entry<UiKey, ImageResult> entry : candidate.images.entrySet()) {
             CoreImageRef ref = images.get(entry.getKey());
@@ -314,8 +337,8 @@ public final class CoreResourceService implements ResourceService, AutoCloseable
                 ref.missing();
             }
         }
-        fontBytes = candidate.fonts;
-        long oldGeneration = generation.getAndSet(newGeneration);
+        long oldGeneration = fontSnapshot.generation();
+        fontSnapshot = candidateFonts;
         notifyReloaded(oldGeneration, newGeneration);
         return newGeneration;
     }
@@ -369,6 +392,9 @@ public final class CoreResourceService implements ResourceService, AutoCloseable
         if (kind == ResourceKind.IMAGE) {
             images.computeIfAbsent(key, candidate -> new CoreImageRef(this, candidate));
         } else {
+            if (key.equals(FontFamilies.DEFAULT.key())) {
+                throw new IllegalArgumentException("The default FandUI font family is reserved");
+            }
             fonts.computeIfAbsent(key, FontFamily::new);
         }
         CoreRegistration registration = new CoreRegistration(slot, source);
@@ -414,7 +440,8 @@ public final class CoreResourceService implements ResourceService, AutoCloseable
         registrations.clear();
         reloadListeners.forEach(ReloadRegistration::deactivate);
         reloadListeners.clear();
-        fontBytes = Map.of();
+        fontSnapshot = FontResourceSnapshot.empty(fontSnapshot.generation());
+        fontValidator = ignored -> { };
         reloadExecutor.shutdownNow();
     }
 

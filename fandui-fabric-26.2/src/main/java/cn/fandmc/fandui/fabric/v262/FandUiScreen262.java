@@ -15,6 +15,7 @@ import cn.fandmc.fandui.api.session.SessionCloseReason;
 import cn.fandmc.fandui.core.input.GlfwInputMapper;
 import cn.fandmc.fandui.core.input.KeyInputState;
 import cn.fandmc.fandui.core.input.PointerInputState;
+import cn.fandmc.fandui.core.input.PointerMoveCoalescer;
 import cn.fandmc.fandui.core.runtime.CoreScreenSession;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.screens.Screen;
@@ -37,8 +38,8 @@ final class FandUiScreen262 extends Screen {
     private final CoreScreenSession session;
     private final LongSupplier clock;
     private final PointerInputState pointer = new PointerInputState();
+    private final PointerMoveCoalescer pointerMoves = new PointerMoveCoalescer();
     private final KeyInputState keys = new KeyInputState();
-    private Point lastPointer;
 
     FandUiScreen262(CoreScreenSession session, LongSupplier clock) {
         super(Component.literal(Objects.requireNonNull(session, "session").screen().title()));
@@ -57,6 +58,7 @@ final class FandUiScreen262 extends Screen {
             int mouseY,
             float tickDelta
     ) {
+        flushPointerMove();
         super.extractRenderState(graphics, mouseX, mouseY, tickDelta);
     }
 
@@ -136,18 +138,14 @@ final class FandUiScreen262 extends Screen {
 
     @Override
     public void mouseMoved(double mouseX, double mouseY) {
-        Point position = point(mouseX, mouseY);
-        Point delta = lastPointer == null
-                ? new Point(0.0f, 0.0f)
-                : new Point(position.x() - lastPointer.x(), position.y() - lastPointer.y());
-        lastPointer = position;
-        dispatch(pointer.move(position, delta, currentModifiers(), now()));
+        pointerMoves.offer(mouseX, mouseY);
     }
 
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+        flushPointerMove();
         Point position = point(event.x(), event.y());
-        lastPointer = position;
+        pointerMoves.synchronize(position);
         return dispatch(pointer.down(
                 position,
                 GlfwInputMapper.button(event.button()),
@@ -157,8 +155,9 @@ final class FandUiScreen262 extends Screen {
 
     @Override
     public boolean mouseReleased(MouseButtonEvent event) {
+        flushPointerMove();
         Point position = point(event.x(), event.y());
-        lastPointer = position;
+        pointerMoves.synchronize(position);
         return dispatch(pointer.up(
                 position,
                 GlfwInputMapper.button(event.button()),
@@ -168,13 +167,8 @@ final class FandUiScreen262 extends Screen {
 
     @Override
     public boolean mouseDragged(MouseButtonEvent event, double dragX, double dragY) {
-        Point position = point(event.x(), event.y());
-        lastPointer = position;
-        return dispatch(pointer.move(
-                position,
-                point(dragX, dragY),
-                GlfwInputMapper.modifiers(event.modifiers()),
-                now()));
+        pointerMoves.offer(event.x(), event.y());
+        return true;
     }
 
     @Override
@@ -184,8 +178,9 @@ final class FandUiScreen262 extends Screen {
             double horizontalAmount,
             double verticalAmount
     ) {
+        flushPointerMove();
         Point position = point(mouseX, mouseY);
-        lastPointer = position;
+        pointerMoves.synchronize(position);
         return dispatch(new ScrollEvent(
                 horizontalAmount,
                 verticalAmount,
@@ -209,6 +204,7 @@ final class FandUiScreen262 extends Screen {
     @Override
     public void removed() {
         super.removed();
+        pointerMoves.clear();
         keys.clear();
         if (!session.active()) {
             return;
@@ -239,6 +235,13 @@ final class FandUiScreen262 extends Screen {
         } catch (RuntimeException exception) {
             LOGGER.error("FandUI screen input handler failed; the screen session was closed", exception);
             return true;
+        }
+    }
+
+    private void flushPointerMove() {
+        var event = pointerMoves.drain(pointer, currentModifiers(), now());
+        if (event != null) {
+            dispatch(event);
         }
     }
 

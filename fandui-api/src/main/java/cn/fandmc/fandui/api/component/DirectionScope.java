@@ -15,7 +15,7 @@ public final class DirectionScope extends UiContainer {
     private LayoutDirection direction;
 
     private DirectionScope(Builder builder) {
-        super(builder.key);
+        super(builder.key, 1, 1);
         direction = builder.direction;
         add(builder.child);
     }
@@ -29,9 +29,11 @@ public final class DirectionScope extends UiContainer {
     }
 
     public UiComponent child() { return children().get(0); }
+    public void setChild(UiComponent child) { replace(0, child); }
     public LayoutDirection direction() { return direction; }
 
     public void setDirection(LayoutDirection value) {
+        requireMutationThread();
         LayoutDirection checked = Objects.requireNonNull(value, "value");
         if (direction != checked) {
             direction = checked;
@@ -42,13 +44,6 @@ public final class DirectionScope extends UiContainer {
     @Override
     public MeasureResult measure(MeasureScope scope, Constraints constraints) {
         return SingleChildSupport.measure(child(), Alignment.TOP_LEFT, scope, constraints);
-    }
-
-    @Override
-    protected void validateChildAddition(UiComponent child, int index) {
-        if (!children().isEmpty()) {
-            throw new IllegalStateException("DirectionScope accepts exactly one child");
-        }
     }
 
     public static final class Builder {

@@ -35,6 +35,40 @@ class RecordingCanvas2DTest {
     }
 
     @Test
+    void reusesCompiledImmutablePaintWithinOneRecording() {
+        RecordingCanvas2D canvas = RecordingCanvas2D.begin();
+        SolidPaint paint = new SolidPaint(Color.rgb(0x20AFFF));
+        canvas.fillRect(new Rect(0.0f, 0.0f, 4.0f, 4.0f), paint);
+        canvas.fillRect(new Rect(5.0f, 0.0f, 4.0f, 4.0f), paint);
+
+        DisplayList displayList = canvas.finish();
+        DisplayCommand.FillRect first = assertInstanceOf(
+                DisplayCommand.FillRect.class, displayList.commands().get(0));
+        DisplayCommand.FillRect second = assertInstanceOf(
+                DisplayCommand.FillRect.class, displayList.commands().get(1));
+
+        assertSame(first.paint(), second.paint());
+    }
+
+    @Test
+    void omitsRedundantGlobalAlphaAndTracksRestoreState() {
+        RecordingCanvas2D canvas = RecordingCanvas2D.begin();
+        canvas.setGlobalAlpha(1.0f);
+        CanvasState state = canvas.save();
+        canvas.setGlobalAlpha(0.5f);
+        canvas.setGlobalAlpha(0.5f);
+        state.close();
+        canvas.setGlobalAlpha(1.0f);
+
+        DisplayList displayList = canvas.finish();
+
+        assertEquals(List.of(
+                DisplayCommand.Save.INSTANCE,
+                new DisplayCommand.SetGlobalAlpha(0.5f),
+                DisplayCommand.Restore.INSTANCE), displayList.commands());
+    }
+
+    @Test
     void recordsBackdropBlurAsAnImmutableBackendNeutralCommand() {
         RecordingCanvas2D canvas = RecordingCanvas2D.begin();
         Rect bounds = new Rect(4.0f, 6.0f, 80.0f, 40.0f);
@@ -68,6 +102,20 @@ class RecordingCanvas2DTest {
         assertEquals(4, displayList.commands().size());
         assertEquals(DisplayCommand.Save.INSTANCE, displayList.commands().get(0));
         assertEquals(DisplayCommand.Restore.INSTANCE, displayList.commands().get(3));
+    }
+
+    @Test
+    void growsTheRecordingStateStackWithoutChangingLifoSemantics() {
+        RecordingCanvas2D canvas = RecordingCanvas2D.begin();
+        List<CanvasState> states = new java.util.ArrayList<>();
+        for (int depth = 0; depth < 32; depth++) {
+            states.add(canvas.save());
+        }
+        for (int depth = states.size() - 1; depth >= 0; depth--) {
+            states.get(depth).close();
+        }
+
+        assertEquals(64, canvas.finish().commands().size());
     }
 
     @Test
@@ -123,6 +171,7 @@ class RecordingCanvas2DTest {
         assertEquals(second.maximumClipDepth(), combined.maximumClipDepth());
         assertEquals(false, combined.hasBackdropBlur());
         assertSame(first.commands().get(0), combined.commands().get(0));
+        assertThrows(UnsupportedOperationException.class, () -> combined.commands().clear());
         assertSame(first, DisplayList.combine(List.of(first)));
         assertEquals(0, DisplayList.combine(List.of()).commands().size());
         assertThrows(NullPointerException.class, () -> DisplayList.combine(List.of(first, null)));

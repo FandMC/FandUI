@@ -16,6 +16,11 @@ import cn.fandmc.fandui.api.text.TextRange;
 import cn.fandmc.fandui.api.text.TextRequest;
 import cn.fandmc.fandui.api.text.TextStyle;
 import cn.fandmc.fandui.api.text.TextWrap;
+import cn.fandmc.fandui.api.resource.ResourceSource;
+import cn.fandmc.fandui.core.resource.CoreResourceService;
+import cn.fandmc.fandui.core.resource.ResourceLookup;
+import cn.fandmc.fandui.core.resource.ResourceReloadException;
+import cn.fandmc.fandui.core.runtime.UiThreadDispatcher;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -24,6 +29,9 @@ import org.junit.jupiter.api.Timeout;
 
 import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -218,6 +226,13 @@ class SkijaTextServiceTest {
     }
 
     @Test
+    void layoutRetainsImmutableSnapshotInsteadOfNativeFontEnvironment() {
+        assertTrue(Arrays.stream(SkijaTextLayout.class.getDeclaredFields())
+                .map(field -> field.getType().getPackageName())
+                .noneMatch(packageName -> packageName.startsWith("io.github.humbleui.skija")));
+    }
+
+    @Test
     void honorsWrapMaxLinesAndEllipsis() {
         String text = "FandUI wraps long English words and 中文段落 across several lines";
         TextRequest request = TextRequest.builder(text, TextStyle.builder(18.0f).build())
@@ -374,6 +389,94 @@ class SkijaTextServiceTest {
         assertInstanceOf(IllegalStateException.class, exception.getCause());
     }
 
+    @Test
+    void customFontsParticipateInLayoutAndOldLayoutsSurviveEnvironmentEviction() throws IOException {
+        CoreResourceService resources = new CoreResourceService(new DirectDispatcher());
+        SkijaTextService local = new SkijaTextService(resources::fontSnapshot);
+        resources.setFontValidator(local::validateFonts);
+        UiKey key = UiKey.of("test", "fonts/custom-sans.otf");
+        FontFamily family = resources.font(key);
+        byte[] font = bundledSansBytes();
+        AtomicLong sourceRevision = new AtomicLong();
+        resources.registerFont(key, () -> Arrays.copyOf(font, font.length + (int) sourceRevision.get()));
+
+        sourceRevision.set(1L);
+        assertEquals(1L, resources.reload(ResourceLookup.empty()));
+        TextRequest request = TextRequest.builder(
+                "Custom font 中文",
+                TextStyle.builder(20.0f).families(family).build()).build();
+        TextLayout oldLayout = local.layout(request).join();
+        assertEquals(0, oldLayout.unresolvedGlyphs());
+        assertEquals(1L, oldLayout.resourceGeneration());
+
+        for (int revision = 2; revision <= 6; revision++) {
+            sourceRevision.set(revision);
+            assertEquals(revision, resources.reload(ResourceLookup.empty()));
+        }
+        SkijaTextEngine.CacheStats beforeOldRaster = local.cacheStats().join();
+        assertTrue(beforeOldRaster.fontEnvironments() <= 4);
+        assertTrue(beforeOldRaster.customTypefaces() > 0);
+
+        TextRaster oldRaster = local.raster(oldLayout, 1.0f).join();
+        assertEquals(1L, oldRaster.resourceGeneration());
+        assertTrue(oldRaster.byteSize() > 0);
+        TextPosition oldHit = local.hitTest(oldLayout, new Point(1.0f, 1.0f)).join();
+        assertValidUtf16Boundary(request.text(), oldHit.offsetUtf16());
+        TextGeometry oldGeometry = local.geometry(
+                oldLayout,
+                TextPosition.downstream(0),
+                List.of(new TextRange(0, 6))).join();
+        assertTrue(oldGeometry.caretBounds().height() > 0.0f);
+        assertFalse(oldGeometry.ranges().get(0).bounds().isEmpty());
+        assertTrue(local.cacheStats().join().fontEnvironments() <= 4);
+
+        local.close();
+        resources.close();
+    }
+
+    @Test
+    void invalidCustomFontRejectsTheWholeGenerationAndPreservesOldLayouts() throws IOException {
+        CoreResourceService resources = new CoreResourceService(new DirectDispatcher());
+        SkijaTextService local = new SkijaTextService(resources::fontSnapshot);
+        resources.setFontValidator(local::validateFonts);
+        UiKey key = UiKey.of("test", "fonts/reload.ttf");
+        FontFamily family = resources.font(key);
+        var valid = resources.registerFont(key, ResourceSource.bytes(bundledSansBytes()));
+        assertEquals(1L, resources.reload(ResourceLookup.empty()));
+        TextRequest request = TextRequest.builder(
+                "stable 中文",
+                TextStyle.builder(20.0f).families(family).build()).build();
+        TextLayout oldLayout = local.layout(request).join();
+
+        valid.close();
+        resources.registerFont(
+                key,
+                ResourceSource.bytes(new byte[]{1, 2, 3, 4}));
+
+        ResourceReloadException failure = assertThrows(
+                ResourceReloadException.class,
+                () -> resources.reload(ResourceLookup.empty()));
+
+        assertEquals(1L, resources.generation());
+        assertInstanceOf(IllegalArgumentException.class, failure.getCause());
+        assertEquals(1L, oldLayout.resourceGeneration());
+        assertTrue(local.raster(oldLayout, 1.0f).join().byteSize() > 0);
+        assertValidUtf16Boundary(
+                request.text(),
+                local.hitTest(oldLayout, new Point(2.0f, 2.0f)).join().offsetUtf16());
+        assertFalse(local.geometry(
+                oldLayout,
+                TextPosition.downstream(0),
+                List.of(new TextRange(0, request.text().length())))
+                .join()
+                .ranges()
+                .get(0)
+                .bounds()
+                .isEmpty());
+        local.close();
+        resources.close();
+    }
+
     private static boolean hasNonZeroByte(ByteBuffer pixels) {
         for (int index = 0; index < pixels.remaining(); index++) {
             if (pixels.get(index) != 0) {
@@ -381,6 +484,27 @@ class SkijaTextServiceTest {
             }
         }
         return false;
+    }
+
+    private static byte[] bundledSansBytes() throws IOException {
+        try (InputStream input = SkijaTextServiceTest.class.getResourceAsStream(BundledFontCatalog.SANS_RESOURCE)) {
+            if (input == null) {
+                throw new IOException("Missing bundled test font");
+            }
+            return input.readAllBytes();
+        }
+    }
+
+    private static final class DirectDispatcher implements UiThreadDispatcher {
+        @Override
+        public boolean isUiThread() {
+            return true;
+        }
+
+        @Override
+        public void execute(Runnable action) {
+            action.run();
+        }
     }
 
     private static byte[] toBytes(ByteBuffer pixels) {

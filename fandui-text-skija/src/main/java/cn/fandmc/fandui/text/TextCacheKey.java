@@ -8,6 +8,7 @@ import cn.fandmc.fandui.api.text.TextDirection;
 import cn.fandmc.fandui.api.text.TextOverflow;
 import cn.fandmc.fandui.api.text.TextRequest;
 import cn.fandmc.fandui.api.text.TextWrap;
+import cn.fandmc.fandui.core.resource.FontResourceSnapshot;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -16,6 +17,7 @@ import java.util.List;
 
 record TextCacheKey(
         long resourceGeneration,
+        String fontResourceFingerprint,
         String text,
         List<UiKey> families,
         int fontSizeBits,
@@ -42,10 +44,11 @@ record TextCacheKey(
         families = List.copyOf(families);
     }
 
-    static TextCacheKey from(TextRequest request, long resourceGeneration) {
+    static TextCacheKey from(TextRequest request, FontResourceSnapshot resources) {
         var style = request.style();
         return new TextCacheKey(
-                resourceGeneration,
+                resources.generation(),
+                resources.contentFingerprint(),
                 request.text(),
                 style.families().stream().map(FontFamily::key).toList(),
                 Float.floatToIntBits(style.fontSize()),
@@ -73,6 +76,7 @@ record TextCacheKey(
         putString(digest, BundledFontCatalog.SANS_SHA256);
         putString(digest, BundledFontCatalog.EMOJI_SHA256);
         putLong(digest, resourceGeneration);
+        putString(digest, fontResourceFingerprint);
         putString(digest, text);
         putInt(digest, families.size());
         for (UiKey family : families) {

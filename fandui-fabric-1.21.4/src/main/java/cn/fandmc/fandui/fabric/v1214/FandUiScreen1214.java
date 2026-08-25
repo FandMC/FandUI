@@ -14,6 +14,7 @@ import cn.fandmc.fandui.api.session.SessionCloseReason;
 import cn.fandmc.fandui.core.input.GlfwInputMapper;
 import cn.fandmc.fandui.core.input.KeyInputState;
 import cn.fandmc.fandui.core.input.PointerInputState;
+import cn.fandmc.fandui.core.input.PointerMoveCoalescer;
 import cn.fandmc.fandui.core.input.Utf16InputAssembler;
 import cn.fandmc.fandui.core.runtime.CoreScreenSession;
 import net.minecraft.client.gui.GuiGraphics;
@@ -33,9 +34,9 @@ final class FandUiScreen1214 extends Screen {
     private final CoreScreenSession session;
     private final LongSupplier clock;
     private final PointerInputState pointer = new PointerInputState();
+    private final PointerMoveCoalescer pointerMoves = new PointerMoveCoalescer();
     private final KeyInputState keys = new KeyInputState();
     private final Utf16InputAssembler textInput = new Utf16InputAssembler();
-    private Point lastPointer;
 
     FandUiScreen1214(CoreScreenSession session, LongSupplier clock) {
         super(Component.literal(Objects.requireNonNull(session, "session").screen().title()));
@@ -49,6 +50,7 @@ final class FandUiScreen1214 extends Screen {
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float tickDelta) {
+        flushPointerMove();
         if (session.screen().background() == ScreenBackground.DEFAULT) {
             renderBackground(graphics, mouseX, mouseY, tickDelta);
         }
@@ -107,18 +109,14 @@ final class FandUiScreen1214 extends Screen {
 
     @Override
     public void mouseMoved(double mouseX, double mouseY) {
-        Point position = point(mouseX, mouseY);
-        Point delta = lastPointer == null
-                ? new Point(0.0f, 0.0f)
-                : new Point(position.x() - lastPointer.x(), position.y() - lastPointer.y());
-        lastPointer = position;
-        dispatch(pointer.move(position, delta, currentModifiers(), now()));
+        pointerMoves.offer(mouseX, mouseY);
     }
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        flushPointerMove();
         Point position = point(mouseX, mouseY);
-        lastPointer = position;
+        pointerMoves.synchronize(position);
         return dispatch(pointer.down(
                 position,
                 GlfwInputMapper.button(button),
@@ -128,8 +126,9 @@ final class FandUiScreen1214 extends Screen {
 
     @Override
     public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        flushPointerMove();
         Point position = point(mouseX, mouseY);
-        lastPointer = position;
+        pointerMoves.synchronize(position);
         return dispatch(pointer.up(
                 position,
                 GlfwInputMapper.button(button),
@@ -139,13 +138,8 @@ final class FandUiScreen1214 extends Screen {
 
     @Override
     public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
-        Point position = point(mouseX, mouseY);
-        lastPointer = position;
-        return dispatch(pointer.move(
-                position,
-                point(dragX, dragY),
-                currentModifiers(),
-                now()));
+        pointerMoves.offer(mouseX, mouseY);
+        return true;
     }
 
     @Override
@@ -155,8 +149,9 @@ final class FandUiScreen1214 extends Screen {
             double horizontalAmount,
             double verticalAmount
     ) {
+        flushPointerMove();
         Point position = point(mouseX, mouseY);
-        lastPointer = position;
+        pointerMoves.synchronize(position);
         return dispatch(new ScrollEvent(
                 horizontalAmount,
                 verticalAmount,
@@ -180,6 +175,7 @@ final class FandUiScreen1214 extends Screen {
     @Override
     public void removed() {
         super.removed();
+        pointerMoves.clear();
         keys.clear();
         textInput.flush();
         if (!session.active()) {
@@ -211,6 +207,13 @@ final class FandUiScreen1214 extends Screen {
         } catch (RuntimeException exception) {
             LOGGER.error("FandUI screen input handler failed; the screen session was closed", exception);
             return true;
+        }
+    }
+
+    private void flushPointerMove() {
+        var event = pointerMoves.drain(pointer, currentModifiers(), now());
+        if (event != null) {
+            dispatch(event);
         }
     }
 

@@ -23,7 +23,7 @@ public final class Positioned extends UiContainer {
     private Alignment alignment;
 
     private Positioned(Builder builder) {
-        super(builder.key);
+        super(builder.key, 1, 1);
         left = builder.left;
         top = builder.top;
         right = builder.right;
@@ -43,6 +43,10 @@ public final class Positioned extends UiContainer {
         return children().get(0);
     }
 
+    public void setChild(UiComponent child) {
+        replace(0, child);
+    }
+
     public OptionalDouble left() { return optional(left); }
     public OptionalDouble top() { return optional(top); }
     public OptionalDouble right() { return optional(right); }
@@ -52,14 +56,15 @@ public final class Positioned extends UiContainer {
     public int zIndex() { return zIndex; }
     public Alignment alignment() { return alignment; }
 
-    public void setLeft(@Nullable Float value) { left = changed(left, value, "left"); }
-    public void setTop(@Nullable Float value) { top = changed(top, value, "top"); }
-    public void setRight(@Nullable Float value) { right = changed(right, value, "right"); }
-    public void setBottom(@Nullable Float value) { bottom = changed(bottom, value, "bottom"); }
-    public void setWidth(@Nullable Float value) { width = changed(width, value, "width"); }
-    public void setHeight(@Nullable Float value) { height = changed(height, value, "height"); }
+    public void setLeft(@Nullable Float value) { requireMutationThread(); left = changed(left, value, "left"); }
+    public void setTop(@Nullable Float value) { requireMutationThread(); top = changed(top, value, "top"); }
+    public void setRight(@Nullable Float value) { requireMutationThread(); right = changed(right, value, "right"); }
+    public void setBottom(@Nullable Float value) { requireMutationThread(); bottom = changed(bottom, value, "bottom"); }
+    public void setWidth(@Nullable Float value) { requireMutationThread(); width = changed(width, value, "width"); }
+    public void setHeight(@Nullable Float value) { requireMutationThread(); height = changed(height, value, "height"); }
 
     public void setZIndex(int value) {
+        requireMutationThread();
         if (zIndex != value) {
             zIndex = value;
             invalidateLayout();
@@ -67,6 +72,7 @@ public final class Positioned extends UiContainer {
     }
 
     public void setAlignment(Alignment value) {
+        requireMutationThread();
         Alignment checked = Objects.requireNonNull(value, "value");
         if (alignment != checked) {
             alignment = checked;
@@ -77,13 +83,6 @@ public final class Positioned extends UiContainer {
     @Override
     public MeasureResult measure(MeasureScope scope, Constraints constraints) {
         return SingleChildSupport.measure(child(), alignment, scope, constraints);
-    }
-
-    @Override
-    protected void validateChildAddition(UiComponent child, int index) {
-        if (!children().isEmpty()) {
-            throw new IllegalStateException("Positioned accepts exactly one child");
-        }
     }
 
     private @Nullable Float changed(@Nullable Float previous, @Nullable Float value, String name) {

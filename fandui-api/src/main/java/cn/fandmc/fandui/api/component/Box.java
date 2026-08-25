@@ -18,7 +18,7 @@ public final class Box extends UiContainer {
     private Alignment alignment;
 
     private Box(Builder builder) {
-        super(builder.key);
+        super(builder.key, 1, 1);
         this.alignment = builder.alignment;
         if (builder.style != null) {
             setStyle(builder.style);
@@ -35,18 +35,11 @@ public final class Box extends UiContainer {
     }
 
     public UiComponent child() {
-        if (children().isEmpty()) {
-            throw new IllegalStateException("Box has no child");
-        }
         return children().get(0);
     }
 
     public void setChild(UiComponent child) {
-        Objects.requireNonNull(child, "child");
-        if (!children().isEmpty()) {
-            remove(0);
-        }
-        add(child);
+        replace(0, child);
     }
 
     public Alignment alignment() {
@@ -54,6 +47,7 @@ public final class Box extends UiContainer {
     }
 
     public void setAlignment(Alignment alignment) {
+        requireMutationThread();
         Alignment checked = Objects.requireNonNull(alignment, "alignment");
         if (this.alignment != checked) {
             this.alignment = checked;
@@ -69,13 +63,6 @@ public final class Box extends UiContainer {
     @Override
     public void paint(PaintScope scope) {
         SingleChildSupport.paintBackground(scope);
-    }
-
-    @Override
-    protected void validateChildAddition(UiComponent child, int index) {
-        if (!children().isEmpty()) {
-            throw new IllegalStateException("Box accepts exactly one child");
-        }
     }
 
     public static final class Builder {

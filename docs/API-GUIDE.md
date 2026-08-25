@@ -79,7 +79,7 @@ FandUI Screen 替换另一张 FandUI Screen 时仍保留最初 parent。
 
 | API | 线程 | 所有权 |
 |---|---|---|
-| `UiRuntime.availability/capabilities/isUiThread` | 任意线程 | 返回不可变快照/值 |
+| `UiRuntime.availability/capabilities/diagnostics/isUiThread` | 任意线程 | 返回不可变快照/值 |
 | `UiRuntime.execute` | 任意线程 | future 表示 action 完成或失败 |
 | Screen、HUD、session、focus、animation | UI 线程 | `ScreenSession`/`HudRegistration` 关闭对应挂载 |
 | 已挂载 component、controller 的 mutation | UI 线程 | component 只能属于一个 parent/session |
@@ -90,6 +90,99 @@ FandUI Screen 替换另一张 FandUI Screen 时仍保留最初 parent。
 
 `AutoCloseable` handle 均采用幂等关闭语义。session 关闭会解除组件绑定、清理焦点并终止其
 动画；关闭 listener handle 只注销 listener，不关闭它观察的对象。
+
+`UiContainer.children()` 返回结构变化时发布的 immutable snapshot；已经取得的旧 snapshot
+不会随之后的增删替换改变。挂载后的组件树只能在 UI 线程修改；未挂载树的结构 mutation
+也会经过统一串行边界，避免多个线程同时破坏内部列表。`structureChanging` 使用线程局部
+重入标记，只拒绝 attach/detach 回调对同一容器的递归修改；全局结构锁负责跨线程的临界区，
+它不是渲染同步机制，也不允许把可变组件树交给渲染线程。未来并行渲染仍只读取 immutable
+frame/display-list snapshot。
+
+`UiContainer.replace(index, child)` 是原子替换：新 child 的 parent、key 或 attach callback
+校验失败时，旧 child、parent 和 `children()` snapshot 都保持有效。`Box`、`Button`、
+`ScrollContainer`、`Flexible`、`Positioned`、`ConstrainedBox`、`ThemeScope`、
+`DirectionScope` 必须始终恰有一个 child，因此拒绝 `remove()`、`clear()` 和第二次 `add()`；
+动态内容使用各自的 `setChild()`，替换在一次 mutation 中完成，不会暴露空的中间树。对这类
+容器调用 `clear()` 会给出包含 `setChild(...)` 建议的 `IllegalStateException`；普通 `Row`、
+`Column`、`Stack` 允许为空并支持 `clear()`。
+
+首批交互控件为 `Checkbox`、`Slider` 和 `ProgressIndicator`。它们的 setter、change listener、
+键盘与 pointer 行为都遵守同一 UI-thread 规则；`Checkbox`/`Slider` 在 pointer down 时获得
+focus 和 capture，`Slider` 同时支持方向键、Home/End 与 PageUp/PageDown，`ProgressIndicator`
+将输入值有限化并 clamp 到 `[0, 1]`。控件的主题 token 可通过 `StyleResolver`/`Theme` 覆盖，
+无需直接接触 Canvas 或 Minecraft 类型。
+
+### 3.1 控件、图标与 SVG
+
+控件使用普通 Java 值和监听器，不需要手写事件状态机：
+
+```java
+ToggleSwitch sound = ToggleSwitch.builder()
+        .selected(true)
+        .onValueChange(enabled -> settings.setSoundEnabled(enabled))
+        .build();
+Slider volume = Slider.builder()
+        .range(0.0, 1.0)
+        .value(0.75)
+        .onValueChange(settings::setVolume)
+        .build();
+Dropdown<String> quality = Dropdown.builder(List.of(
+        Dropdown.Option.of("fast", "快速 / Fast"),
+        Dropdown.Option.of("quality", "质量 / Quality")))
+        .onValueChange(settings::setQuality)
+        .build();
+Icon search = Icon.of(Icons.SEARCH);
+Map<String, IconDefinition> presets = Icons.all();
+Icon settings = Icon.of(presets.get("SETTINGS"));
+```
+
+`Icons` 当前内置 58 个具名预设，覆盖导航、文件操作、编辑、可见性、账户、媒体、窗口和状态提示。
+`Icons.all()` 返回同一份按常量声明顺序排列的只读 `Map<String, IconDefinition>`，也包含
+`CHECKMARK`、`ARROW_LEFT` 等兼容别名；因此图标选择器和文档生成器无需复制一份容易遗漏的名称清单。
+预设定义只包含 FandUI 的不可变 `Path`、fill 和 stroke 数据，类加载后不会解析 SVG、创建纹理或接触
+Minecraft/Fabric/native 类型。
+
+`ToggleSwitch.setSelected(...)` 会立即提交布尔值和 change listener，thumb 的视觉位置由 session
+拥有的 `AnimationManager` 在 140 ms 内过渡；动画中途反向会从当前视觉值继续，不创建控件私有
+计时器。默认 `ToggleSwitch.THUMB_INSET` 为 `3.0` 逻辑像素，可通过 `Theme` 覆盖。
+
+`Dropdown.setExpanded(...)` 同样立即更新交互状态，菜单高度和箭头在 160 ms 内过渡。选项始终
+受当前动画高度裁剪，收起期间不会越过组件边界绘制。两种过渡都只在所属 session 活跃时运行，
+组件 detach 会取消动画；开关只使 paint 失效，下拉菜单仅在过渡帧使 layout 失效。
+
+`ScrollContainer` 只在 child extent 大于 viewport extent 时产生可滚动偏移；内容完整可见时
+`maximumOffset()` 为 `0`。滚轮和 pointer drag 由容器处理，尺寸、GUI Scale 或窗口变化后会在
+下一次 layout 自动重算范围。综合测试面板用一个外层垂直容器覆盖整页，并保留底部日志区作为
+嵌套滚动验证，不要求业务代码注册窗口回调。
+
+`IconDefinition.fromSvg(String)` 和 `SvgIcon` 将 SVG 解析为不可变 Canvas path，运行时不创建
+图片纹理，也不把 Skija、NanoVG 或 Minecraft 类型带入公共签名。解析器支持受限且有界的
+`path`、`rect`、`circle`、`ellipse`、`line`、`polyline`、`polygon`、`g`/`transform`，以及
+solid `fill`/`stroke`、`rgb`/`rgba`、opacity、stroke cap/join 和标准 path 命令
+`M/L/H/V/C/S/Q/T/A/Z`。外部实体、DOCTYPE、`image`/`use`、`text`、filter、外部 CSS 和
+渐变引用会被拒绝或忽略；需要渐变时使用 `Canvas2D`/`Style` 的平台中立 API。
+
+资源图片也可直接使用 SVG：
+
+```java
+UiKey logoKey = UiKey.of("example", "textures/logo.svg");
+ImageRef logo = FandUI.runtime().resources().image(logoKey);
+ResourceRegistration registration = FandUI.runtime().resources().registerImage(
+        logoKey,
+        ResourceSource.svg("<svg viewBox=\"0 0 64 24\">"
+                + "<rect width=\"64\" height=\"24\" rx=\"6\" fill=\"#20aee8\"/>"
+                + "</svg>"));
+```
+
+`ResourceSource.svg(byte[]/String)` 发布 `ResourceFormat.SVG` 提示；旧的
+`ResourceSource.bytes(...)` 保持兼容，并按 PNG signature 或 UTF-8 SVG 根元素自动选择解码器。
+SVG 在资源 reload worker 上仅栅格化一次。root 的正数 `width`/`height`（可带 `px`）优先作为
+intrinsic size；只提供一个可用尺寸时按 `viewBox` 比例补齐，两个尺寸都缺失或使用百分比/相对
+单位时使用 `viewBox` 的向上取整像素。随后沿用 PNG 相同的 premultiplied RGBA8、SHA-256
+texture key 和 OpenGL texture LRU。reload 仍是
+完整 candidate generation 的原子发布：任一 SVG 解析、尺寸预算或像素转换失败，旧 READY
+generation 保持不变。资源 SVG 受 2 MiB 编码、4096 边长和 64 MiB 解码像素预算限制；需要
+无损缩放的 UI 图标应优先使用 `SvgIcon`。
 
 ## 4. Style 消费规则
 
@@ -148,13 +241,22 @@ HUD 默认 `HudInputMode.PASS_THROUGH`，不会抢占游戏输入。只有显式
 missing 时可从 `failure()` 读取实际 source/decode 异常；已有 READY 图片在失败 reload 后继续
 引用上一 generation。
 
+自定义字体通过 `registerFont` 加入下一次完整 candidate generation。reload 发布前 Skija 会
+真实解析所有 TTF/OTF；任一字体无效时整代回滚。每个 `TextLayout` 保存该 generation 的不可变
+字体字节 snapshot，不保存 `FontCollection` 等 native handle。每次 Paragraph/raster 操作都会
+短暂持有 environment lease，LRU 只会淘汰没有活跃 native 使用者的环境，忙碌环境会延迟到
+lease 释放后再关闭。环境查找、lease 获取和 LRU 扫描在同一缓存临界区完成，不会在两步之间
+拿到已经退休的环境。Skija 最多缓存四个 native 字体环境；旧环境淘汰后，旧 layout 的 raster、
+`hitTest()` 和 `geometry()` 会按其 snapshot 重建环境，因此仍可使用。`FontFamilies.DEFAULT`
+保留给内置 CJK/Emoji fallback，不能注册覆盖。
+
 ## 8. 文字
 
 `TextService.layout`、`hitTest` 和 `geometry` 都是异步操作。标准 `Text`/`TextInput` 采用
 latest-request-wins，并在新结果等待期间保留上一完整 visual，不会把半成品帧提交给 renderer。
 索引统一为 UTF-16 offset，并保证 surrogate boundary；长度限制按 Unicode code point 计算。
 
-## 9. 可用性与失败处理
+## 9. 可用性、诊断与失败处理
 
 先读取：
 
@@ -164,6 +266,50 @@ if (!FandUI.runtime().availability().available()) {
 }
 ```
 
+Renderer 细节从任意线程读取动态 immutable snapshot：
+
+```java
+var diagnostics = FandUI.runtime().diagnostics();
+if (diagnostics.targetReady()) {
+    int width = diagnostics.framebufferWidth();
+    int height = diagnostics.framebufferHeight();
+    boolean blur = diagnostics.backdropBlur();
+}
+```
+
+`backend()` 使用稳定的 `UNKNOWN/OPENGL/VULKAN` 枚举，`backendName()` 是宿主诊断名；
+`targetReady()` 只会在 FandUI pass 成功验证并使用 Minecraft color target 后变为 `true`。
+此时可读取实际 framebuffer 尺寸、`UiColorFormat.RGBA8_UNORM`、最大纹理尺寸和
+Stencil/Backdrop Blur 可用性。resize、目标丢失、renderer 失败或 shutdown 会原子清除全部
+target-dependent 字段。26.2 在最终 GUI hook 观察实际 Minecraft backend；Vulkan 模式只报告
+`UiRendererBackend.VULKAN` 和原因，不创建 OpenGL fallback。
+
 Screen/HUD 创建在 runtime 不可用时抛出 `UiUnavailableException`。`execute`、Text future 和其他
 异步结果通过 exceptional completion 传递失败。不要静默切换到另一套 renderer，也不要绕过
 公共 API 访问 native/Minecraft handle。
+
+## 10. 内置综合测试界面
+
+FandUI JAR 内含一个默认关闭的开发 fixture，用于对三个 Minecraft bridge 运行相同的组件树。
+设置 JVM property `fandui.test.ui=true` 后，测试 Screen 会在首个 client tick 自动打开；关闭后
+按 `F9` 可重开。旧的基础 Demo 仍由 `fandui.demo.screen=true` 控制并使用 `F8`，两者互不替代。
+
+综合 fixture 覆盖中英文、日文、韩文、Emoji 与字体 fallback，Button、TextInput、Checkbox、
+ToggleSwitch、Slider、ProgressIndicator、Dropdown、预设 Icon、inline `SvgIcon`、reload worker
+栅格化的 SVG `Image`、圆角背景、描边、线性渐变、三层路径裁剪、Backdrop Blur 和滚动容器。
+布局只读取 runtime 提供的 `UiViewport`；resize、GUI Scale 与 framebuffer generation 变化不需要
+业务组件注册窗口回调或手动失效。
+
+面板内容由外层垂直 `ScrollContainer` 承载，紧凑视口下整页可滚动，底部日志仍是独立的嵌套
+滚动区域。开关 thumb 与下拉菜单分别使用 140 ms、160 ms 的 session 动画，便于在三个 bridge
+上同时检查连续重绘、布局失效、裁剪和中途反向。
+
+```powershell
+$env:JAVA_TOOL_OPTIONS="-Dfandui.test.ui=true"
+./gradlew.bat :fandui-fabric-1.20.1:runClient --console=plain --max-workers=2
+./gradlew.bat :fandui-fabric-1.21.4:runClient --console=plain --max-workers=2
+./gradlew.bat :fandui-fabric-26.2:runClient --console=plain --max-workers=2
+```
+
+同一时间只运行一个客户端。该 property 是 FandUI 自身的开发验收入口，不属于业务 Mod 必须
+依赖的公共 API。

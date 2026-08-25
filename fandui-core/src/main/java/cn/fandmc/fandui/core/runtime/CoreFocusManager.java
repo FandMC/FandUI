@@ -139,8 +139,7 @@ final class CoreFocusManager implements FocusManager {
                 result.add(node);
             }
         }
-        result.sort(Comparator.comparingInt(LayoutNode::tabIndex)
-                .thenComparingInt(layout.paintOrder()::indexOf));
+        result.sort(Comparator.comparingInt(LayoutNode::tabIndex));
         return result;
     }
 

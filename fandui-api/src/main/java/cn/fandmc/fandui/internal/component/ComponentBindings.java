@@ -62,6 +62,14 @@ public final class ComponentBindings {
         }
     }
 
+    public static void interactionChanged(UiComponent component) {
+        ComponentBinding binding = binding(component);
+        if (binding != null) {
+            binding.assertUiThread();
+            binding.interactionChanged(component);
+        }
+    }
+
     public static void childAdded(UiContainer parent, UiComponent child) {
         ComponentBinding binding = binding(parent);
         if (binding != null) {
@@ -75,6 +83,17 @@ public final class ComponentBindings {
         if (binding != null) {
             binding.assertUiThread();
             binding.childRemoved(parent, child);
+        }
+    }
+
+    public static void childReplaced(
+            UiContainer parent,
+            UiComponent previous,
+            UiComponent replacement) {
+        ComponentBinding binding = binding(parent);
+        if (binding != null) {
+            binding.assertUiThread();
+            binding.childReplaced(parent, previous, replacement);
         }
     }
 
